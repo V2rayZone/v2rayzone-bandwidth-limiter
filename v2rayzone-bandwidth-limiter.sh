@@ -308,9 +308,17 @@ check_status() {
     view_settings
 }
 
-# Function to update geo files
-update_geo_files() {
-    echo -e "${YELLOW}This feature is not implemented yet${PLAIN}"
+# Function to view logs
+view_logs() {
+    if [ -f "$LOG_FILE" ]; then
+        echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Logs ===${PLAIN}"
+        tail -n 50 "$LOG_FILE"
+        echo ""
+        read -p "Press Enter to continue..."
+    else
+        echo -e "${YELLOW}No logs found.${PLAIN}"
+        sleep 2
+    fi
 }
 
 # Function to display menu
@@ -348,7 +356,6 @@ show_menu() {
 
 # Main function
 main() {
-    check_status
     show_menu
     
     case "$choice" in
@@ -356,16 +363,17 @@ main() {
         2) uninstall ;;
         3) configure_bandwidth ;;
         4) view_settings ;;
-        5) start_service ;;
-        6) stop_service ;;
-        7) restart_service ;;
-        8) check_status_verbose ;;
+        5) start_limiter ;;
+        6) stop_limiter ;;
+        7) restart_limiter ;;
+        8) check_status ;;
         9) view_logs ;;
         0) exit 0 ;;
         *) echo -e "${RED}Invalid option. Please try again.${PLAIN}" && sleep 2 && main ;;
     esac
     
     # Return to main menu after function completes
+    read -p "Press Enter to continue..."
     main
 }
 
@@ -386,132 +394,5 @@ if [ "$1" == "--stop" ]; then
     exit 0
 fi
 
-# Main menu
-while true; do
-    clear
-    echo -e "${BLUE}V2RayZone Bandwidth Management Script${PLAIN}"
-    echo -e "${BLUE}0.${PLAIN} Exit Script"
-    echo -e "${BLUE}1.${PLAIN} Install"
-    echo -e "${BLUE}2.${PLAIN} Update"
-    echo -e "${BLUE}3.${PLAIN} Update Menu"
-    echo -e "${BLUE}4.${PLAIN} Legacy Version"
-    echo -e "${BLUE}5.${PLAIN} Uninstall"
-    echo -e ""
-    echo -e "${BLUE}6.${PLAIN} Reset Username & Password & Secret Token"
-    echo -e "${BLUE}7.${PLAIN} Reset Web Base Path"
-    echo -e "${BLUE}8.${PLAIN} Reset Certificate"
-    echo -e "${BLUE}9.${PLAIN} Change Port"
-    echo -e "${BLUE}10.${PLAIN} View Current Settings"
-    echo -e ""
-    echo -e "${BLUE}11.${PLAIN} Start"
-    echo -e "${BLUE}12.${PLAIN} Stop"
-    echo -e "${BLUE}13.${PLAIN} Restart"
-    echo -e "${BLUE}14.${PLAIN} Check Status"
-    echo -e "${BLUE}15.${PLAIN} Logs Management"
-    echo -e ""
-    echo -e "${BLUE}16.${PLAIN} Enable Autostart"
-    echo -e "${BLUE}17.${PLAIN} Disable Autostart"
-    echo -e ""
-    echo -e "${BLUE}18.${PLAIN} SSL Certificate Management"
-    echo -e "${BLUE}19.${PLAIN} Cloudflare SSL Certificate"
-    echo -e "${BLUE}20.${PLAIN} IP Limit Management"
-    echo -e "${BLUE}21.${PLAIN} Firewall Management"
-    echo -e "${BLUE}22.${PLAIN} SSH Port Forwarding Management"
-    echo -e ""
-    echo -e "${BLUE}23.${PLAIN} Enable BBR"
-    echo -e "${BLUE}24.${PLAIN} Update Geo Files"
-    echo -e "${BLUE}25.${PLAIN} Speedtest by Ookla"
-    echo -e ""
-    echo -e "${BLUE}Panel status: ${STATUS}${PLAIN}"
-    echo -e "${BLUE}Start automatically: Yes${PLAIN}"
-    echo -e "${BLUE}xray status: Running${PLAIN}"
-    echo -e ""
-    read -p "Please enter your selection [0-25]: " choice
-    
-    case $choice in
-        0)
-            exit 0
-            ;;
-        1)
-            install_script
-            configure_bandwidth
-            start_limiter
-            ;;
-        2)
-            echo -e "${YELLOW}Updating script...${PLAIN}"
-            # Add update logic here
-            ;;
-        3)
-            echo -e "${YELLOW}Updating menu...${PLAIN}"
-            # Add menu update logic here
-            ;;
-        4)
-            echo -e "${YELLOW}Legacy version not available${PLAIN}"
-            ;;
-        5)
-            uninstall
-            exit 0
-            ;;
-        6|7|8|9)
-            echo -e "${YELLOW}This feature is not applicable to bandwidth limiter${PLAIN}"
-            ;;
-        10)
-            view_settings
-            ;;
-        11)
-            start_limiter
-            ;;
-        12)
-            stop_limiter
-            ;;
-        13)
-            restart_limiter
-            ;;
-        14)
-            check_status
-            ;;
-        15)
-            view_logs
-            ;;
-        16)
-            systemctl enable v2rayzone-bandwidth-limiter
-            echo -e "${GREEN}Autostart enabled${PLAIN}"
-            ;;
-        17)
-            systemctl disable v2rayzone-bandwidth-limiter
-            echo -e "${GREEN}Autostart disabled${PLAIN}"
-            ;;
-        18|19|20|21|22)
-            echo -e "${YELLOW}This feature is not applicable to bandwidth limiter${PLAIN}"
-            ;;
-        23)
-            echo -e "${YELLOW}Enabling BBR...${PLAIN}"
-            # Add BBR enabling logic here
-            ;;
-        24)
-            update_geo_files
-            ;;
-        25)
-            echo -e "${YELLOW}Running speedtest...${PLAIN}"
-            # Add speedtest logic here
-            ;;
-        *)
-            echo -e "${RED}Invalid option${PLAIN}"
-            ;;
-    esac
-    
-    read -p "Press Enter to continue..."
-done
-
-# Function to view logs
-view_logs() {
-    if [ -f "$LOG_FILE" ]; then
-        echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Logs ===${PLAIN}"
-        tail -n 50 "$LOG_FILE"
-        echo ""
-        read -p "Press Enter to continue..."
-    else
-        echo -e "${YELLOW}No logs found.${PLAIN}"
-        sleep 2
-    fi
-}
+# Start the main function
+main
