@@ -1,0 +1,517 @@
+#!/bin/bash
+
+# V2RayZone Bandwidth Limiter
+# Author: V2RayZone
+# Description: A script to limit bandwidth on Ubuntu VPS
+
+# Colors
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[36m"
+PLAIN="\033[0m"
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   echo -e "${RED}This script must be run as root${PLAIN}"
+   exit 1
+fi
+
+# Check if tc is installed
+if ! command -v tc &> /dev/null; then
+    echo -e "${YELLOW}Installing traffic control tools...${PLAIN}"
+    apt-get update
+    apt-get install -y iproute2
+fi
+
+# Check Ubuntu version
+ubuntu_version=$(lsb_release -rs)
+if (( $(echo "$ubuntu_version < 20" | bc -l) )); then
+    echo -e "${RED}This script requires Ubuntu 20.04 or higher${PLAIN}"
+    exit 1
+fi
+
+# Variables
+CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
+SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
+SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
+LOG_FILE="/var/log/v2rayzone-bandwidth-limiter.log"
+INTERFACE=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
+STATUS="stopped"
+
+# Load configuration if exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+    if [ -z "$TOTAL_TB" ] || [ -z "$START_DATE" ] || [ -z "$SPEED_LIMIT" ]; then
+        echo -e "${YELLOW}Configuration file is incomplete, reconfiguring...${PLAIN}"
+    else
+        STATUS="configured"
+    fi
+fi
+
+# Check if service is running
+if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+    STATUS="running"
+fi
+
+# Function to calculate days elapsed
+calculate_days_elapsed() {
+    local start_date=$1
+    local current_date=$(date +%s)
+    local start_timestamp=$(date -d "$start_date" +%s)
+    local days_diff=$(( (current_date - start_timestamp) / 86400 ))
+    echo $days_diff
+}
+
+# Function to calculate recommended speed limit
+calculate_speed_limit() {
+    local total_tb=$1
+    local days_elapsed=$2
+    local total_bytes=$(echo "$total_tb * 1024 * 1024 * 1024 * 1024" | bc)
+    local remaining_days=$(( 30 - days_elapsed ))
+    
+    if [ $remaining_days -le 0 ]; then
+        remaining_days=1
+    fi
+    
+    local bytes_per_day=$(echo "$total_bytes / 30" | bc)
+    local bytes_used=$(echo "$bytes_per_day * $days_elapsed" | bc)
+    local bytes_remaining=$(echo "$total_bytes - $bytes_used" | bc)
+    
+    if [ "$bytes_remaining" -le 0 ]; then
+        bytes_remaining=1
+    fi
+    
+    local bytes_per_remaining_day=$(echo "$bytes_remaining / $remaining_days" | bc)
+    local bits_per_second=$(echo "$bytes_per_remaining_day * 8 / 86400" | bc)
+    
+    # Convert to Mbps for display
+    local mbps=$(echo "$bits_per_second / 1024 / 1024" | bc)
+    echo $mbps
+}
+
+# Function to apply bandwidth limit
+apply_bandwidth_limit() {
+    local speed_limit=$1  # Speed limit in Mbps
+    local interface=$2
+    
+    # Convert Mbps to kbps for tc
+    local kbps=$(echo "$speed_limit * 1024" | bc)
+    
+    # Clear any existing tc rules
+    tc qdisc del dev $interface root 2>/dev/null
+    
+    # Apply the new limit
+    tc qdisc add dev $interface root handle 1: htb default 10
+    tc class add dev $interface parent 1: classid 1:10 htb rate ${kbps}kbit
+    
+    echo "$(date): Applied bandwidth limit of ${speed_limit}Mbps to interface $interface" >> "$LOG_FILE"
+    echo -e "${GREEN}Bandwidth limit of ${speed_limit}Mbps applied successfully${PLAIN}"
+}
+
+# Function to remove bandwidth limit
+remove_bandwidth_limit() {
+    local interface=$1
+    tc qdisc del dev $interface root 2>/dev/null
+    echo "$(date): Removed bandwidth limit from interface $interface" >> "$LOG_FILE"
+    echo -e "${GREEN}Bandwidth limit removed successfully${PLAIN}"
+}
+
+# Function to save configuration
+save_configuration() {
+    local total_tb=$1
+    local start_date=$2
+    local speed_limit=$3
+    
+    echo "TOTAL_TB=$total_tb" > "$CONFIG_FILE"
+    echo "START_DATE=$start_date" >> "$CONFIG_FILE"
+    echo "SPEED_LIMIT=$speed_limit" >> "$CONFIG_FILE"
+    echo "INTERFACE=$INTERFACE" >> "$CONFIG_FILE"
+    
+    echo "$(date): Configuration saved - Total: ${total_tb}TB, Start Date: $start_date, Speed Limit: ${speed_limit}Mbps" >> "$LOG_FILE"
+}
+
+# Function to create systemd service
+create_service() {
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=V2RayZone Bandwidth Limiter
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$SCRIPT_PATH --start
+ExecStop=$SCRIPT_PATH --stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    echo "$(date): Systemd service created" >> "$LOG_FILE"
+}
+
+# Function to install the script
+install_script() {
+    # Copy the script to the system path
+    cp "$0" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    
+    # Create log file
+    touch "$LOG_FILE"
+    
+    # Create service
+    create_service
+    
+    echo "$(date): Script installed to $SCRIPT_PATH" >> "$LOG_FILE"
+    echo -e "${GREEN}V2RayZone Bandwidth Limiter installed successfully${PLAIN}"
+}
+
+# Function to uninstall
+uninstall() {
+    # Stop the service if running
+    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+        systemctl stop v2rayzone-bandwidth-limiter
+    fi
+    
+    # Disable the service
+    systemctl disable v2rayzone-bandwidth-limiter 2>/dev/null
+    
+    # Remove bandwidth limit
+    remove_bandwidth_limit "$INTERFACE"
+    
+    # Remove files
+    rm -f "$SERVICE_FILE"
+    rm -f "$SCRIPT_PATH"
+    rm -f "$CONFIG_FILE"
+    rm -f "$LOG_FILE"
+    
+    systemctl daemon-reload
+    
+    echo -e "${GREEN}V2RayZone Bandwidth Limiter uninstalled successfully${PLAIN}"
+}
+
+# Function to configure bandwidth limit
+configure_bandwidth() {
+    echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Configuration ===${PLAIN}"
+    
+    # Ask for total TB
+    read -p "Enter total TB allocation for this VPS: " total_tb
+    while ! [[ "$total_tb" =~ ^[0-9]+(\.[0-9]+)?$ ]]; do
+        echo -e "${RED}Please enter a valid number${PLAIN}"
+        read -p "Enter total TB allocation for this VPS: " total_tb
+    done
+    
+    # Ask for start date
+    read -p "Enter the number of days this VPS has been running: " days_running
+    while ! [[ "$days_running" =~ ^[0-9]+$ ]]; do
+        echo -e "${RED}Please enter a valid number${PLAIN}"
+        read -p "Enter the number of days this VPS has been running: " days_running
+    done
+    
+    # Calculate start date
+    start_date=$(date -d "$days_running days ago" +"%Y-%m-%d")
+    
+    # Calculate recommended speed limit
+    days_elapsed=$days_running
+    recommended_speed=$(calculate_speed_limit $total_tb $days_elapsed)
+    
+    echo -e "${YELLOW}Based on your input:${PLAIN}"
+    echo -e "Total allocation: ${total_tb}TB"
+    echo -e "VPS running for: $days_elapsed days"
+    echo -e "Recommended speed limit: ${recommended_speed}Mbps"
+    
+    # Ask if user wants to use recommended speed
+    read -p "Do you want to use the recommended speed limit? (y/n): " use_recommended
+    
+    if [[ "$use_recommended" =~ ^[Yy]$ ]]; then
+        speed_limit=$recommended_speed
+    else
+        read -p "Enter your desired speed limit in Mbps: " speed_limit
+        while ! [[ "$speed_limit" =~ ^[0-9]+(\.[0-9]+)?$ ]]; do
+            echo -e "${RED}Please enter a valid number${PLAIN}"
+            read -p "Enter your desired speed limit in Mbps: " speed_limit
+        done
+    fi
+    
+    # Save configuration
+    save_configuration "$total_tb" "$start_date" "$speed_limit"
+    
+    # Apply the bandwidth limit
+    apply_bandwidth_limit "$speed_limit" "$INTERFACE"
+    
+    # Update status
+    STATUS="configured"
+    
+    echo -e "${GREEN}Configuration completed successfully${PLAIN}"
+}
+
+# Function to display current settings
+view_settings() {
+    if [ "$STATUS" == "configured" ] || [ "$STATUS" == "running" ]; then
+        local days_elapsed=$(calculate_days_elapsed "$START_DATE")
+        local recommended_speed=$(calculate_speed_limit $TOTAL_TB $days_elapsed)
+        
+        echo -e "${BLUE}=== Current Settings ===${PLAIN}"
+        echo -e "Total allocation: ${TOTAL_TB}TB"
+        echo -e "Start date: $START_DATE (${days_elapsed} days ago)"
+        echo -e "Current speed limit: ${SPEED_LIMIT}Mbps"
+        echo -e "Recommended speed limit: ${recommended_speed}Mbps"
+        echo -e "Interface: $INTERFACE"
+        echo -e "Status: $STATUS"
+    else
+        echo -e "${YELLOW}No configuration found. Please configure first.${PLAIN}"
+    fi
+}
+
+# Function to start the bandwidth limiter
+start_limiter() {
+    if [ "$STATUS" != "configured" ] && [ "$STATUS" != "running" ]; then
+        echo -e "${YELLOW}No configuration found. Please configure first.${PLAIN}"
+        return 1
+    fi
+    
+    apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    systemctl start v2rayzone-bandwidth-limiter
+    systemctl enable v2rayzone-bandwidth-limiter
+    
+    STATUS="running"
+    echo -e "${GREEN}V2RayZone Bandwidth Limiter started successfully${PLAIN}"
+}
+
+# Function to stop the bandwidth limiter
+stop_limiter() {
+    systemctl stop v2rayzone-bandwidth-limiter
+    remove_bandwidth_limit "$INTERFACE"
+    
+    STATUS="configured"
+    echo -e "${GREEN}V2RayZone Bandwidth Limiter stopped successfully${PLAIN}"
+}
+
+# Function to restart the bandwidth limiter
+restart_limiter() {
+    stop_limiter
+    sleep 1
+    start_limiter
+}
+
+# Function to check status
+check_status() {
+    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+        echo -e "${GREEN}V2RayZone Bandwidth Limiter is running${PLAIN}"
+    else
+        echo -e "${RED}V2RayZone Bandwidth Limiter is not running${PLAIN}"
+    fi
+    
+    view_settings
+}
+
+# Function to update geo files
+update_geo_files() {
+    echo -e "${YELLOW}This feature is not implemented yet${PLAIN}"
+}
+
+# Function to display menu
+show_menu() {
+    clear
+    echo -e "${BLUE}======================================${PLAIN}"
+    echo -e "${BLUE}    V2RayZone Bandwidth Limiter      ${PLAIN}"
+    echo -e "${BLUE}======================================${PLAIN}"
+    echo -e ""
+    echo -e "${GREEN}---- Installation ----${PLAIN}"
+    echo -e "1. Install"
+    echo -e "2. Uninstall"
+    echo -e ""
+    echo -e "${GREEN}---- Bandwidth Management ----${PLAIN}"
+    echo -e "3. Set Bandwidth Limit"
+    echo -e "4. View Current Settings"
+    echo -e ""
+    echo -e "${GREEN}---- Service Control ----${PLAIN}"
+    echo -e "5. Start Limiter"
+    echo -e "6. Stop Limiter"
+    echo -e "7. Restart Limiter"
+    echo -e "8. Check Status"
+    echo -e ""
+    echo -e "${GREEN}---- Maintenance ----${PLAIN}"
+    echo -e "9. View Logs"
+    echo -e "0. Exit"
+    echo -e ""
+    echo -e "Panel status: ${STATUS}"
+    if [ "$STATUS" != "stopped" ]; then
+        echo -e "Start automatically: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
+    fi
+    echo -e ""
+    read -p "Please enter your selection [0-9]: " choice
+}
+
+# Main function
+main() {
+    check_status
+    show_menu
+    
+    case "$choice" in
+        1) install_script && configure_bandwidth ;;
+        2) uninstall ;;
+        3) configure_bandwidth ;;
+        4) view_settings ;;
+        5) start_service ;;
+        6) stop_service ;;
+        7) restart_service ;;
+        8) check_status_verbose ;;
+        9) view_logs ;;
+        0) exit 0 ;;
+        *) echo -e "${RED}Invalid option. Please try again.${PLAIN}" && sleep 2 && main ;;
+    esac
+    
+    # Return to main menu after function completes
+    main
+}
+
+# Handle command line arguments
+if [ "$1" == "--start" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    fi
+    exit 0
+fi
+
+if [ "$1" == "--stop" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        remove_bandwidth_limit "$INTERFACE"
+    fi
+    exit 0
+fi
+
+# Main menu
+while true; do
+    clear
+    echo -e "${BLUE}V2RayZone Bandwidth Management Script${PLAIN}"
+    echo -e "${BLUE}0.${PLAIN} Exit Script"
+    echo -e "${BLUE}1.${PLAIN} Install"
+    echo -e "${BLUE}2.${PLAIN} Update"
+    echo -e "${BLUE}3.${PLAIN} Update Menu"
+    echo -e "${BLUE}4.${PLAIN} Legacy Version"
+    echo -e "${BLUE}5.${PLAIN} Uninstall"
+    echo -e ""
+    echo -e "${BLUE}6.${PLAIN} Reset Username & Password & Secret Token"
+    echo -e "${BLUE}7.${PLAIN} Reset Web Base Path"
+    echo -e "${BLUE}8.${PLAIN} Reset Certificate"
+    echo -e "${BLUE}9.${PLAIN} Change Port"
+    echo -e "${BLUE}10.${PLAIN} View Current Settings"
+    echo -e ""
+    echo -e "${BLUE}11.${PLAIN} Start"
+    echo -e "${BLUE}12.${PLAIN} Stop"
+    echo -e "${BLUE}13.${PLAIN} Restart"
+    echo -e "${BLUE}14.${PLAIN} Check Status"
+    echo -e "${BLUE}15.${PLAIN} Logs Management"
+    echo -e ""
+    echo -e "${BLUE}16.${PLAIN} Enable Autostart"
+    echo -e "${BLUE}17.${PLAIN} Disable Autostart"
+    echo -e ""
+    echo -e "${BLUE}18.${PLAIN} SSL Certificate Management"
+    echo -e "${BLUE}19.${PLAIN} Cloudflare SSL Certificate"
+    echo -e "${BLUE}20.${PLAIN} IP Limit Management"
+    echo -e "${BLUE}21.${PLAIN} Firewall Management"
+    echo -e "${BLUE}22.${PLAIN} SSH Port Forwarding Management"
+    echo -e ""
+    echo -e "${BLUE}23.${PLAIN} Enable BBR"
+    echo -e "${BLUE}24.${PLAIN} Update Geo Files"
+    echo -e "${BLUE}25.${PLAIN} Speedtest by Ookla"
+    echo -e ""
+    echo -e "${BLUE}Panel status: ${STATUS}${PLAIN}"
+    echo -e "${BLUE}Start automatically: Yes${PLAIN}"
+    echo -e "${BLUE}xray status: Running${PLAIN}"
+    echo -e ""
+    read -p "Please enter your selection [0-25]: " choice
+    
+    case $choice in
+        0)
+            exit 0
+            ;;
+        1)
+            install_script
+            configure_bandwidth
+            start_limiter
+            ;;
+        2)
+            echo -e "${YELLOW}Updating script...${PLAIN}"
+            # Add update logic here
+            ;;
+        3)
+            echo -e "${YELLOW}Updating menu...${PLAIN}"
+            # Add menu update logic here
+            ;;
+        4)
+            echo -e "${YELLOW}Legacy version not available${PLAIN}"
+            ;;
+        5)
+            uninstall
+            exit 0
+            ;;
+        6|7|8|9)
+            echo -e "${YELLOW}This feature is not applicable to bandwidth limiter${PLAIN}"
+            ;;
+        10)
+            view_settings
+            ;;
+        11)
+            start_limiter
+            ;;
+        12)
+            stop_limiter
+            ;;
+        13)
+            restart_limiter
+            ;;
+        14)
+            check_status
+            ;;
+        15)
+            view_logs
+            ;;
+        16)
+            systemctl enable v2rayzone-bandwidth-limiter
+            echo -e "${GREEN}Autostart enabled${PLAIN}"
+            ;;
+        17)
+            systemctl disable v2rayzone-bandwidth-limiter
+            echo -e "${GREEN}Autostart disabled${PLAIN}"
+            ;;
+        18|19|20|21|22)
+            echo -e "${YELLOW}This feature is not applicable to bandwidth limiter${PLAIN}"
+            ;;
+        23)
+            echo -e "${YELLOW}Enabling BBR...${PLAIN}"
+            # Add BBR enabling logic here
+            ;;
+        24)
+            update_geo_files
+            ;;
+        25)
+            echo -e "${YELLOW}Running speedtest...${PLAIN}"
+            # Add speedtest logic here
+            ;;
+        *)
+            echo -e "${RED}Invalid option${PLAIN}"
+            ;;
+    esac
+    
+    read -p "Press Enter to continue..."
+done
+
+# Function to view logs
+view_logs() {
+    if [ -f "$LOG_FILE" ]; then
+        echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Logs ===${PLAIN}"
+        tail -n 50 "$LOG_FILE"
+        echo ""
+        read -p "Press Enter to continue..."
+    else
+        echo -e "${YELLOW}No logs found.${PLAIN}"
+        sleep 2
+    fi
+}
