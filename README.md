@@ -10,6 +10,7 @@ A script to limit bandwidth on Ubuntu VPS systems (version 20.04 and above) base
 - Configurable speed limits with user confirmation
 - Detailed logging of all operations
 - Easy one-command installation
+- Command shortcut (`v2bwl`) for quick access to the bandwidth limiter menu
 
 ## Requirements
 
