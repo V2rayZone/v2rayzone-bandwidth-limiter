@@ -153,6 +153,22 @@ EOF
     echo "$(date): Systemd service created" >> "$LOG_FILE"
 }
 
+# Function to create command shortcut
+create_command_shortcut() {
+    local shortcut_name="v2bwl"
+    local shortcut_file="/usr/local/bin/$shortcut_name"
+    
+    cat > "$shortcut_file" << EOF
+#!/bin/bash
+$SCRIPT_PATH
+EOF
+    
+    chmod +x "$shortcut_file"
+    echo "$(date): Command shortcut '$shortcut_name' created" >> "$LOG_FILE"
+    echo -e "${GREEN}Command shortcut '$shortcut_name' created successfully${PLAIN}"
+    echo -e "${YELLOW}You can now type '$shortcut_name' to access the bandwidth limiter menu${PLAIN}"
+}
+
 # Function to install the script
 install_script() {
     # Copy the script to the system path
@@ -164,6 +180,9 @@ install_script() {
     
     # Create service
     create_service
+    
+    # Create command shortcut
+    create_command_shortcut
     
     echo "$(date): Script installed to $SCRIPT_PATH" >> "$LOG_FILE"
     echo -e "${GREEN}V2RayZone Bandwidth Limiter installed successfully${PLAIN}"
@@ -187,6 +206,7 @@ uninstall() {
     rm -f "$SCRIPT_PATH"
     rm -f "$CONFIG_FILE"
     rm -f "$LOG_FILE"
+    rm -f "/usr/local/bin/v2bwl"
     
     systemctl daemon-reload
     
