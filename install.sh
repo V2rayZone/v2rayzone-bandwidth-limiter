@@ -14,7 +14,7 @@ PLAIN="\033[0m"
 GITHUB_REPO="V2RayZone/v2rayzone-bandwidth-limiter"
 INSTALL_DIR="/opt/v2rayzone-bandwidth-limiter"
 SCRIPT_NAME="v2rayzone-bandwidth-limiter.sh"
-LOG_FILE="/var/log/v2rayzone-installer.log"
+DEFAULT_VERSION="latest"
 
 echo -e "${BLUE}V2RayZone Bandwidth Limiter Installer${PLAIN}"
 
@@ -31,20 +31,19 @@ check_dependencies() {
     done
 }
 
-# Prompt for version
 prompt_version() {
     echo -e "${YELLOW}Enter version to install (e.g., v1.0, latest):${PLAIN}"
-    read -r VERSION
+    read -r VERSION_INPUT
 
-    if [[ -z "$VERSION" ]]; then
+    if [[ -z "$VERSION_INPUT" ]]; then
         VERSION="latest"
         echo -e "${GREEN}Using latest version...${PLAIN}"
     else
+        VERSION="$VERSION_INPUT"
         echo -e "${GREEN}Installing version: $VERSION...${PLAIN}"
     fi
 }
 
-# Get ZIP download URL
 get_download_url() {
     if [[ "$VERSION" == "latest" ]]; then
         DOWNLOAD_URL=$(curl -s https://api.github.com/repos/$GITHUB_REPO/releases/latest \
@@ -58,9 +57,9 @@ get_download_url() {
     else
         DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$VERSION/v2rayzone-bandwidth-limiter.zip"
     fi
+    echo -e "${BLUE}Download URL: $DOWNLOAD_URL${PLAIN}"
 }
 
-# Download ZIP file
 download_zip() {
     echo -e "${YELLOW}Downloading version: $VERSION...${PLAIN}"
     rm -rf "$INSTALL_DIR"
@@ -69,19 +68,25 @@ download_zip() {
     curl -Ls "$DOWNLOAD_URL" -o "$INSTALL_DIR/v2rayzone-bandwidth-limiter.zip"
 
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Download failed. Check your internet or version exists.${PLAIN}"
+        echo -e "${RED}Download failed. Check internet connection or version exists.${PLAIN}"
         exit 1
     fi
 }
 
-# Extract ZIP file
 extract_zip() {
     echo -e "${YELLOW}Extracting files...${PLAIN}"
     unzip "$INSTALL_DIR/v2rayzone-bandwidth-limiter.zip" -d "$INSTALL_DIR" > /dev/null
 
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to extract ZIP file. Corrupted or invalid format?${PLAIN}"
+        echo -e "${RED}Failed to extract ZIP. Corrupted or invalid format?${PLAIN}"
         exit 1
+    fi
+
+    # Detect extracted subfolder
+    extracted_dir=$(unzip -l "$INSTALL_DIR/v2rayzone-bandwidth-limiter.zip" | awk '/^dr/ {print $4}' | head -1)
+    if [ -n "$extracted_dir" ] && [ -d "$INSTALL_DIR/$extracted_dir" ]; then
+        mv "$INSTALL_DIR/$extracted_dir"/* "$INSTALL_DIR/"
+        rmdir "$INSTALL_DIR/$extracted_dir"
     fi
 
     if [ ! -f "$INSTALL_DIR/$SCRIPT_NAME" ]; then
@@ -92,14 +97,12 @@ extract_zip() {
     chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 }
 
-# Run the main script
 run_main_script() {
     echo -e "${GREEN}Starting bandwidth limiter setup...${PLAIN}"
     cd "$INSTALL_DIR" || { echo -e "${RED}Failed to enter install directory${PLAIN}"; exit 1; }
     "./$SCRIPT_NAME"
 }
 
-# Main function using loop instead of recursion
 main_loop() {
     while true; do
         clear
@@ -129,7 +132,6 @@ main_loop() {
     done
 }
 
-# Start execution
 trap 'echo -e "\n${YELLOW}Installation cancelled by user.${PLAIN}"; exit 1' INT
 
 check_dependencies
