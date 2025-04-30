@@ -82,10 +82,10 @@ extract_zip() {
         exit 1
     fi
 
-    # Detect extracted subfolder
+    # Handle GitHub ZIP structure (with subfolder)
     extracted_dir=$(unzip -l "$INSTALL_DIR/v2rayzone-bandwidth-limiter.zip" | awk '/^dr/ {print $4}' | head -1)
     if [ -n "$extracted_dir" ] && [ -d "$INSTALL_DIR/$extracted_dir" ]; then
-        mv "$INSTALL_DIR/$extracted_dir"/* "$INSTALL_DIR/"
+        mv "$INSTALL_DIR/$extracted_dir"/* "$INSTALL_DIR/" 2>/dev/null
         rmdir "$INSTALL_DIR/$extracted_dir"
     fi
 
