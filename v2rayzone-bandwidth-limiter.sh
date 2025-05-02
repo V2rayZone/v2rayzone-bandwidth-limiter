@@ -84,8 +84,21 @@ if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
     STATUS="running"
 fi
 
-# Ensure log directory exists
+# Ensure log directory exists and set permissions
 mkdir -p "$(dirname "$LOG_FILE")"
+if [[ ! -f "$LOG_FILE" ]]; then
+    touch "$LOG_FILE"
+    chown root:root "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+else
+    # Rotate logs over 1MB
+    if [[ $(stat -c %s "$LOG_FILE") -gt 1048576 ]]; then
+        mv "$LOG_FILE" "${LOG_FILE}.old"
+        touch "$LOG_FILE"
+        chown root:root "$LOG_FILE"
+        chmod 644 "$LOG_FILE"
+    fi
+fi
 
 # Function to calculate days elapsed
 calculate_days_elapsed() {
@@ -96,7 +109,8 @@ calculate_days_elapsed() {
         echo -e "${RED}Invalid date format:${start_date}${PLAIN}"
         return 1
     fi
-    echo $(( (current_date - start_timestamp) / 86400 ))
+    local days_diff=$(( (current_date - start_timestamp) / 86400 ))
+    echo "$days_diff"
 }
 
 # Function to calculate recommended speed limit
@@ -104,29 +118,29 @@ calculate_speed_limit() {
     local total_tb="$1"
     local days_elapsed="$2"
 
-    # Prevent negative days from future dates
+    # Prevent negative days due to future dates
     if (( days_elapsed < 0 )); then
         days_elapsed=0
     fi
 
+    local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l 2>/dev/null)
     local remaining_days=$(( 30 - days_elapsed ))
     [[ "$remaining_days" -le 0 ]] && remaining_days=1
+    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l 2>/dev/null)
+    local bytes_used=$(echo "scale=2; $bytes_per_day * $days_elapsed" | bc -l 2>/dev/null)
+    local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l 2>/dev/null)
 
-    local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l)
-    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l)
-    local bytes_used=$(echo "scale=2; $bytes_per_day * $days_elapsed" | bc -l)
-    local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l)
-    [[ "$bytes_remaining" == "0" || "$bytes_remaining" -lt 0 ]] && bytes_remaining=1
+    [[ "$bytes_remaining" == "0" || "$bytes_remaining" == "0.00" || "$bytes_remaining" =~ ^$ ]] && bytes_remaining=1
 
-    local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l)
-    local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l)
-    local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l)
+    local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l 2>/dev/null)
+    local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l 2>/dev/null)
+    local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l 2>/dev/null)
     echo "${mbps:-1}"
 }
 
 # Apply bandwidth limit
 apply_bandwidth_limit() {
-    local speed_limit="$1"  # Speed limit in Mbps
+    local speed_limit="$1"
     local interface="$2"
 
     if [[ -z "$interface" ]]; then
@@ -175,14 +189,12 @@ create_service() {
 [Unit]
 Description=V2RayZone Bandwidth Limiter
 After=network.target
-
 [Service]
 Type=simple
 ExecStart=$SCRIPT_PATH --start
 ExecStop=$SCRIPT_PATH --stop
 Restart=on-failure
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -209,6 +221,7 @@ install_script() {
     cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
     touch "$LOG_FILE"
     chown root:root "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
     create_service
     create_command_shortcut
     echo -e "${GREEN}Script installed successfully. Run 'v2bwl' to launch.${PLAIN}"
@@ -219,26 +232,21 @@ uninstall() {
     echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
     read -p "Type 'yes' to confirm: " confirm
     [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
-
     if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
         systemctl stop v2rayzone-bandwidth-limiter
     fi
-
     systemctl disable v2rayzone-bandwidth-limiter 2>/dev/null
-
     if [[ -n "$INTERFACE" ]]; then
         remove_bandwidth_limit "$INTERFACE"
     else
         INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
         [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
     fi
-
     rm -fv "$SERVICE_FILE"
     rm -fv "$SCRIPT_PATH"
     rm -fv "$CONFIG_FILE"
     rm -fv "$LOG_FILE"
     rm -fv "/usr/local/bin/v2bwl"
-
     systemctl daemon-reload
     echo -e "${GREEN}Limiter uninstalled successfully.${PLAIN}"
 }
@@ -246,19 +254,16 @@ uninstall() {
 # Configure bandwidth
 configure_bandwidth() {
     echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Configuration ===${PLAIN}"
-
     read -p "Enter total TB allocation for this VPS: " total_tb
     while ! [[ "$total_tb" =~ ^[0-9]+(\.[0-9]+)?$ ]]; do
         echo -e "${RED}Please enter a valid number${PLAIN}"
         read -p "Enter total TB allocation for this VPS: " total_tb
     done
-
     read -p "Enter the number of days this VPS has been running: " days_running
     while ! [[ "$days_running" =~ ^[0-9]+$ ]]; do
         echo -e "${RED}Please enter a valid integer${PLAIN}"
         read -p "Enter number of days running: " days_running
     done
-
     start_date=$(date -d "$days_running days ago" +"%Y-%m-%d")
     days_elapsed=$(calculate_days_elapsed "$start_date")
     recommended_speed=$(calculate_speed_limit "$total_tb" "$days_elapsed")
@@ -293,7 +298,6 @@ view_settings() {
             STATUS="incomplete"
             return 1
         fi
-
         local days_elapsed=$(calculate_days_elapsed "$START_DATE")
         local recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed")
 
@@ -317,7 +321,6 @@ view_settings() {
                 TOTAL_TB=""
                 START_DATE=""
                 SPEED_LIMIT=""
-                INTERFACE=""
                 STATUS="stopped"
                 echo -e "${GREEN}Configuration deleted successfully${PLAIN}"
                 ;;
@@ -328,7 +331,7 @@ view_settings() {
                 ;;
         esac
     else
-        echo -e "${YELLOW}No configuration file found. Please configure first.${PLAIN}"
+        echo -e "${YELLOW}No configuration found. Please configure first.${PLAIN}"
         sleep 2
     fi
 }
@@ -336,7 +339,6 @@ view_settings() {
 # Service Control Functions
 start_limiter() {
     source "$CONFIG_FILE" 2>/dev/null || { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
-
     apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     systemctl enable --now v2rayzone-bandwidth-limiter
     STATUS="running"
@@ -371,6 +373,7 @@ view_logs() {
     if [[ -f "$LOG_FILE" ]]; then
         echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
         tail -n 50 "$LOG_FILE"
+        echo ""
         read -p "Press Enter to continue..."
     else
         echo -e "${YELLOW}No logs found.${PLAIN}"
@@ -383,31 +386,30 @@ show_menu() {
     clear
     echo -e "${BLUE}======================================${PLAIN}"
     echo -e "${BLUE}    V2RayZone Bandwidth Limiter      ${PLAIN}"
-    echo -e "${BLUE}======================================${PLAIN}\n"
-
+    echo -e "${BLUE}======================================${PLAIN}
+"
     echo -e "${GREEN}---- Installation ----${PLAIN}"
     echo -e "1. Install"
-    echo -e "2. Uninstall\n"
-
+    echo -e "2. Uninstall
+"
     echo -e "${GREEN}---- Bandwidth Management ----${PLAIN}"
     echo -e "3. Set Bandwidth Limit"
-    echo -e "4. View Current Settings\n"
-
+    echo -e "4. View Current Settings
+"
     echo -e "${GREEN}---- Service Control ----${PLAIN}"
     echo -e "5. Start Limiter"
     echo -e "6. Stop Limiter"
     echo -e "7. Restart Limiter"
-    echo -e "8. Check Status\n"
-
+    echo -e "8. Check Status
+"
     echo -e "${GREEN}---- Maintenance ----${PLAIN}"
     echo -e "9. View Logs"
-    echo -e "0. Exit\n"
-
+    echo -e "0. Exit
+"
     echo -e "Panel status: ${STATUS}"
     if [[ "$STATUS" != "stopped" ]]; then
         echo -e "Auto-start: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
     fi
-
     echo -e ""
     read -p "Please enter your selection [0-9]: " choice
 }
