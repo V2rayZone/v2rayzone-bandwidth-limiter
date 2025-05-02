@@ -2,7 +2,6 @@
 # V2RayZone Bandwidth Limiter v2.1 - FINAL VERSION
 # Author: V2RayZone
 # Description: A script to limit bandwidth + enforce monthly quota on Ubuntu VPS
-
 # Colors
 RED="\033[31m"
 GREEN="\033[32m"
@@ -201,6 +200,9 @@ track_and_enforce_usage() {
         tc qdisc del dev "$INTERFACE" root 2>/dev/null
         tc qdisc add dev "$INTERFACE" root handle 1: htb default 10
         tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "1kbit"
+    else
+        echo -e "${YELLOW}Reapplying configured bandwidth limit: ${SPEED_LIMIT}Mbps${PLAIN}"
+        apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     fi
 }
 
