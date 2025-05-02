@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.0
+# V2RayZone Bandwidth Limiter - FINAL VERSION
 # Author: V2RayZone
 # Description: A script to limit bandwidth on Ubuntu VPS
 
@@ -10,52 +10,13 @@ YELLOW="\033[33m"
 BLUE="\033[36m"
 PLAIN="\033[0m"
 
-# Lock file to prevent multiple instances
-LOCK_FILE="/var/lock/v2rayzone-bandwidth-limiter.lock"
-
-# Exit if another instance is already running
-if [[ -f "$LOCK_FILE" ]]; then
-    echo -e "${YELLOW}Another instance detected. Cleaning up old configuration...${PLAIN}"
-
-    # Try to source config if exists to get INTERFACE
-    CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-    fi
-
-    # Stop systemd service if running
-    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-        systemctl stop v2rayzone-bandwidth-limiter
-    fi
-
-    # Remove bandwidth limit if interface known
-    if [ -n "$INTERFACE" ]; then
-        tc qdisc del dev "$INTERFACE" root 2>/dev/null
-    fi
-
-    # Remove old files
-    rm -fv "$CONFIG_FILE"
-    rm -fv "/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
-    rm -fv "/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
-    rm -fv "/usr/local/bin/v2bwl"
-    systemctl daemon-reload
-
-    echo -e "${GREEN}Old configuration cleaned up successfully.${PLAIN}"
-fi
-
-# Create lock file
-touch "$LOCK_FILE"
-
-# Remove lock file on exit
-trap "rm -f $LOCK_FILE" EXIT
-
-# Check if root
+# Check if running as root
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}This script must be run as root${PLAIN}"
    exit 1
 fi
 
-# Install iproute2 if missing
+# Check if tc is installed
 if ! command -v tc &> /dev/null; then
     echo -e "${YELLOW}Installing traffic control tools...${PLAIN}"
     apt-get update && apt-get install -y iproute2
@@ -73,38 +34,22 @@ CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
 SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
 SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
 LOG_FILE="/var/log/v2rayzone-bandwidth-limiter.log"
-INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
+INTERFACE=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
 STATUS="stopped"
 
 # Load configuration if exists
-if [[ -f "$CONFIG_FILE" ]]; then
+if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
-    if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" ]]; then
-        echo -e "${YELLOW}Configuration file is incomplete, reconfiguring...${PLAIN}"
+    if [ -z "$TOTAL_TB" ] || [ -z "$START_DATE" ] || [ -z "$SPEED_LIMIT" ]; then
+        echo -e "${YELLOW}Configuration file is incomplete, please reconfigure.${PLAIN}"
     else
         STATUS="configured"
     fi
 fi
 
-# Check systemd status
+# Check if service is running
 if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
     STATUS="running"
-fi
-
-# Ensure log directory exists and set permissions
-mkdir -p "$(dirname "$LOG_FILE")"
-if [[ ! -f "$LOG_FILE" ]]; then
-    touch "$LOG_FILE"
-    chown root:root "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
-else
-    # Rotate logs over 1MB
-    if [[ $(stat -c %s "$LOG_FILE") -gt 1048576 ]]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
-        chown root:root "$LOG_FILE"
-        chmod 644 "$LOG_FILE"
-    fi
 fi
 
 # Function to calculate days elapsed
@@ -123,16 +68,24 @@ calculate_days_elapsed() {
 calculate_speed_limit() {
     local total_tb="$1"
     local days_elapsed="$2"
-    local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l 2>/dev/null)
+
+    # Prevent negative days (e.g., future start date)
+    if (( days_elapsed < 0 )); then
+        days_elapsed=0
+    fi
+
     local remaining_days=$(( 30 - days_elapsed ))
     [[ "$remaining_days" -le 0 ]] && remaining_days=1
-    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l 2>/dev/null)
-    local bytes_used=$(echo "scale=2; $bytes_per_day * $days_elapsed" | bc -l 2>/dev/null)
-    local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l 2>/dev/null)
-    [[ "$bytes_remaining" == "0" || "$bytes_remaining" == "0.00" || "$bytes_remaining" =~ ^$ ]] && bytes_remaining=1
-    local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l 2>/dev/null)
-    local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l 2>/dev/null)
-    local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l 2>/dev/null)
+
+    local total_bytes=$(echo "$total_tb * 1024 * 1024 * 1024 * 1024" | bc -l)
+    local bytes_per_day=$(echo "$total_bytes / 30" | bc -l)
+    local bytes_used=$(echo "$bytes_per_day * $days_elapsed" | bc -l)
+    local bytes_remaining=$(echo "$total_bytes - $bytes_used" | bc -l)
+    [[ "$bytes_remaining" == 0 || "$bytes_remaining" -lt 0 ]] && bytes_remaining=1
+
+    local bytes_per_remaining_day=$(echo "$bytes_remaining / $remaining_days" | bc -l)
+    local bits_per_second=$(echo "$bytes_per_remaining_day * 8 / 86400" | bc -l)
+    local mbps=$(echo "$bits_per_second / 1048576" | bc -l)
     echo "${mbps:-1}"
 }
 
@@ -221,7 +174,6 @@ install_script() {
     cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
     touch "$LOG_FILE"
     chown root:root "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
     create_service
     create_command_shortcut
     echo -e "${GREEN}Script installed successfully. Run 'v2bwl' to launch.${PLAIN}"
@@ -229,7 +181,7 @@ install_script() {
 
 # Uninstall
 uninstall() {
-    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
+    echo -e "${YELLOW}Are you sure you want to uninstall? This will remove all settings!${PLAIN}"
     read -p "Type 'yes' to confirm: " confirm
     [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
 
@@ -241,9 +193,6 @@ uninstall() {
 
     if [[ -n "$INTERFACE" ]]; then
         remove_bandwidth_limit "$INTERFACE"
-    else
-        INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
-        [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
     fi
 
     rm -fv "$SERVICE_FILE"
@@ -297,11 +246,10 @@ configure_bandwidth() {
     STATUS="configured"
 }
 
-# View current settings + delete option
+# View current settings
 view_settings() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-
         if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$INTERFACE" ]]; then
             echo -e "${RED}Incomplete configuration found${PLAIN}"
             STATUS="incomplete"
@@ -331,6 +279,7 @@ view_settings() {
                 TOTAL_TB=""
                 START_DATE=""
                 SPEED_LIMIT=""
+                INTERFACE=""
                 STATUS="stopped"
                 echo -e "${GREEN}Configuration deleted successfully${PLAIN}"
                 ;;
@@ -341,21 +290,23 @@ view_settings() {
                 ;;
         esac
     else
-        echo -e "${YELLOW}No configuration found. Please configure first.${PLAIN}"
+        echo -e "${YELLOW}No configuration file found. Please configure first.${PLAIN}"
         sleep 2
     fi
 }
 
-# Service Control Functions
+# Start function
 start_limiter() {
     source "$CONFIG_FILE" 2>/dev/null || { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
 
     apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    systemctl daemon-reload
     systemctl enable --now v2rayzone-bandwidth-limiter
     STATUS="running"
     echo -e "${GREEN}Limiter started successfully.${PLAIN}"
 }
 
+# Stop function
 stop_limiter() {
     systemctl stop v2rayzone-bandwidth-limiter
     remove_bandwidth_limit "$INTERFACE"
@@ -363,12 +314,14 @@ stop_limiter() {
     echo -e "${GREEN}Limiter stopped successfully.${PLAIN}"
 }
 
+# Restart function
 restart_limiter() {
     stop_limiter
     sleep 1
     start_limiter
 }
 
+# Check status
 check_status() {
     if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
         echo -e "${GREEN}Limiter is running${PLAIN}"
@@ -380,11 +333,11 @@ check_status() {
     view_settings
 }
 
+# View logs
 view_logs() {
     if [[ -f "$LOG_FILE" ]]; then
         echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
         tail -n 50 "$LOG_FILE"
-        echo ""
         read -p "Press Enter to continue..."
     else
         echo -e "${YELLOW}No logs found.${PLAIN}"
@@ -452,9 +405,6 @@ if [[ "$1" == "--start" ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
         apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
-    else
-        echo -e "${RED}No configuration file found. Cannot start.$PLAIN"
-        exit 1
     fi
     exit 0
 fi
