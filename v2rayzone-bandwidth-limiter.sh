@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.0
+# V2RayZone Bandwidth Limiter v2.0 - FINAL VERSION
 # Author: V2RayZone
 # Description: A script to limit bandwidth on Ubuntu VPS
 # Colors
@@ -39,7 +39,6 @@ fi
 
 # Create lock file
 touch "$LOCK_FILE"
-# Remove lock file on exit
 trap "rm -f $LOCK_FILE" EXIT
 
 # Check if root
@@ -84,21 +83,8 @@ if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
     STATUS="running"
 fi
 
-# Ensure log directory exists and set permissions
+# Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
-if [[ ! -f "$LOG_FILE" ]]; then
-    touch "$LOG_FILE"
-    chown root:root "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
-else
-    # Rotate logs over 1MB
-    if [[ $(stat -c %s "$LOG_FILE") -gt 1048576 ]]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
-        chown root:root "$LOG_FILE"
-        chmod 644 "$LOG_FILE"
-    fi
-fi
 
 # Function to calculate days elapsed
 calculate_days_elapsed() {
@@ -109,32 +95,23 @@ calculate_days_elapsed() {
         echo -e "${RED}Invalid date format:${start_date}${PLAIN}"
         return 1
     fi
-    local days_diff=$(( (current_date - start_timestamp) / 86400 ))
-    echo "$days_diff"
+    echo $(( (current_date - start_timestamp) / 86400 ))
 }
 
 # Function to calculate recommended speed limit
 calculate_speed_limit() {
     local total_tb="$1"
     local days_elapsed="$2"
-
-    # Prevent negative days due to future dates
-    if (( days_elapsed < 0 )); then
-        days_elapsed=0
-    fi
-
-    local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l 2>/dev/null)
+    local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l)
     local remaining_days=$(( 30 - days_elapsed ))
     [[ "$remaining_days" -le 0 ]] && remaining_days=1
-    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l 2>/dev/null)
-    local bytes_used=$(echo "scale=2; $bytes_per_day * $days_elapsed" | bc -l 2>/dev/null)
-    local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l 2>/dev/null)
-
+    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l)
+    local bytes_used=$(echo "scale=2; $bytes_per_day * $days_elapsed" | bc -l)
+    local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l)
     [[ "$bytes_remaining" == "0" || "$bytes_remaining" == "0.00" || "$bytes_remaining" =~ ^$ ]] && bytes_remaining=1
-
-    local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l 2>/dev/null)
-    local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l 2>/dev/null)
-    local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l 2>/dev/null)
+    local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l)
+    local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l)
+    local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l)
     echo "${mbps:-1}"
 }
 
@@ -191,7 +168,7 @@ Description=V2RayZone Bandwidth Limiter
 After=network.target
 [Service]
 Type=simple
-ExecStart=$SCRIPT_PATH --start
+ExecStart=/bin/bash -c 'sleep 3 && $SCRIPT_PATH --start'
 ExecStop=$SCRIPT_PATH --stop
 Restart=on-failure
 RestartSec=5
@@ -221,7 +198,6 @@ install_script() {
     cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
     touch "$LOG_FILE"
     chown root:root "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
     create_service
     create_command_shortcut
     echo -e "${GREEN}Script installed successfully. Run 'v2bwl' to launch.${PLAIN}"
@@ -339,6 +315,7 @@ view_settings() {
 # Service Control Functions
 start_limiter() {
     source "$CONFIG_FILE" 2>/dev/null || { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
+    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
     apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     systemctl enable --now v2rayzone-bandwidth-limiter
     STATUS="running"
@@ -386,30 +363,31 @@ show_menu() {
     clear
     echo -e "${BLUE}======================================${PLAIN}"
     echo -e "${BLUE}    V2RayZone Bandwidth Limiter      ${PLAIN}"
-    echo -e "${BLUE}======================================${PLAIN}
-"
+    echo -e "${BLUE}======================================${PLAIN}\n"
+
     echo -e "${GREEN}---- Installation ----${PLAIN}"
     echo -e "1. Install"
-    echo -e "2. Uninstall
-"
+    echo -e "2. Uninstall\n"
+
     echo -e "${GREEN}---- Bandwidth Management ----${PLAIN}"
     echo -e "3. Set Bandwidth Limit"
-    echo -e "4. View Current Settings
-"
+    echo -e "4. View Current Settings\n"
+
     echo -e "${GREEN}---- Service Control ----${PLAIN}"
     echo -e "5. Start Limiter"
     echo -e "6. Stop Limiter"
     echo -e "7. Restart Limiter"
-    echo -e "8. Check Status
-"
+    echo -e "8. Check Status\n"
+
     echo -e "${GREEN}---- Maintenance ----${PLAIN}"
     echo -e "9. View Logs"
-    echo -e "0. Exit
-"
+    echo -e "0. Exit\n"
+
     echo -e "Panel status: ${STATUS}"
     if [[ "$STATUS" != "stopped" ]]; then
         echo -e "Auto-start: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
     fi
+
     echo -e ""
     read -p "Please enter your selection [0-9]: " choice
 }
@@ -439,7 +417,13 @@ main() {
 if [[ "$1" == "--start" ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+        INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
+        if [[ -n "$INTERFACE" ]]; then
+            apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+        else
+            echo -e "${RED}No network interface detected. Cannot apply limit.${PLAIN}"
+            exit 1
+        fi
     else
         echo -e "${RED}No configuration file found. Cannot start.$PLAIN"
         exit 1
