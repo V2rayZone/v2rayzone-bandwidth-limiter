@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.1 - FINAL VERSION
+# V2RayZone Bandwidth Limiter v2.2 - FINAL VERSION
 # Author: V2RayZone
 # Description: A script to limit bandwidth + enforce monthly quota on Ubuntu VPS
 
@@ -15,7 +15,6 @@ LOCK_FILE="/var/lock/v2rayzone-bandwidth-limiter.lock"
 
 if [[ -f "$LOCK_FILE" ]]; then
     echo -e "${YELLOW}Another instance detected. Cleaning up old configuration...${PLAIN}"
-    # Try to source config if exists to get INTERFACE
     CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
     USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
     SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
@@ -82,8 +81,9 @@ fi
 if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
     source "$USAGE_LOG"
-    if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" ]]; then
+    if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$INTERFACE" ]]; then
         echo -e "${YELLOW}Configuration file is incomplete, reconfiguring...${PLAIN}"
+        STATUS="incomplete"
     else
         STATUS="configured"
     fi
@@ -94,8 +94,8 @@ if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
     STATUS="running"
 fi
 
-# Function to calculate days remaining from start date
-calculate_days_remaining() {
+# Function to calculate days elapsed
+calculate_days_elapsed() {
     local start_date="$1"
     local current_date=$(date +%s)
     local start_timestamp=0
@@ -103,9 +103,7 @@ calculate_days_remaining() {
         echo -e "${RED}Invalid date format:${start_date}${PLAIN}"
         return 1
     fi
-    local days_diff=$(( (current_date - start_timestamp) / 86400 ))
-    local days_left=$(( 30 - days_diff ))
-    echo "${days_left:-0}"
+    echo $(( (current_date - start_timestamp) / 86400 ))
 }
 
 # Function to calculate recommended speed limit
@@ -114,18 +112,43 @@ calculate_speed_limit() {
     local days_elapsed="$2"
     local remaining_days=$(( 30 - days_elapsed ))
     [[ "$remaining_days" -le 0 ]] && remaining_days=1
-
     local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l)
+    local bytes_per_day=$(echo "scale=2; $total_bytes / 30" | bc -l)
     local bytes_used=$(cat "$USAGE_LOG" | grep -oP 'USED_BYTES=\K[0-9]+')
     [[ -z "$bytes_used" ]] && bytes_used=0
-
     local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l)
     [[ "$bytes_remaining" == "0" || "$bytes_remaining" == "0.00" || "$bytes_remaining" -lt 0 ]] && bytes_remaining=1
-
     local bytes_per_remaining_day=$(echo "scale=2; $bytes_remaining / $remaining_days" | bc -l)
     local bits_per_second=$(echo "scale=2; $bytes_per_remaining_day * 8 / 86400" | bc -l)
     local mbps=$(echo "scale=0; $bits_per_second / 1048576" | bc -l)
     echo "${mbps:-1}"
+}
+
+# Track outbound usage and enforce cap
+track_and_enforce_usage() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${RED}No config found. Cannot track usage.${PLAIN}"
+        exit 1
+    fi
+
+    source "$CONFIG_FILE"
+    source "$USAGE_LOG"
+
+    tx_bytes=$(grep "$INTERFACE" /proc/net/dev | awk '{print $10}')
+    NEW_USED_BYTES=$(echo "$USED_BYTES + $tx_bytes" | bc)
+
+    echo "USED_BYTES=$NEW_USED_BYTES" > "$USAGE_LOG"
+
+    max_bytes=$(echo "$TOTAL_TB * 1024 * 1024 * 1024 * 1024" | bc -l)
+
+    if (( $(echo "$NEW_USED_BYTES >= $max_bytes" | bc -l) )); then
+        echo -e "${RED}Monthly quota of ${TOTAL_TB}TB reached. Throttling to minimum speed...${PLAIN}"
+
+        # Apply throttling rule
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null
+        tc qdisc add dev "$INTERFACE" root handle 1: htb default 10
+        tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "1kbit"
+    fi
 }
 
 # Apply bandwidth limit
@@ -145,6 +168,7 @@ apply_bandwidth_limit() {
     echo -e "${YELLOW}Applying new limit: ${speed_limit}Mbps${PLAIN}"
     tc qdisc add dev "$interface" root handle 1: htb default 10
     tc class add dev "$interface" parent 1: classid 1:10 htb rate "${kbps}kbit"
+
     echo "$(date): Applied bandwidth limit of ${speed_limit}Mbps to interface $interface" >> "$LOG_FILE"
     echo -e "${GREEN}Bandwidth limit of ${speed_limit}Mbps applied successfully${PLAIN}"
 }
@@ -172,37 +196,13 @@ save_configuration() {
     echo -e "${GREEN}Configuration saved successfully${PLAIN}"
 }
 
-# Track outbound usage and enforce cap
-track_and_enforce_usage() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${RED}No config found. Cannot track usage.${PLAIN}"
-        exit 1
-    fi
-
-    source "$CONFIG_FILE"
-    source "$USAGE_LOG"
-
-    tx_bytes=$(grep "$INTERFACE" /proc/net/dev | awk '{print $10}')
-    NEW_USED_BYTES=$(echo "$USED_BYTES + $tx_bytes" | bc)
-
-    echo "USED_BYTES=$NEW_USED_BYTES" > "$USAGE_LOG"
-
-    max_bytes=$(echo "$TOTAL_TB * 1024 * 1024 * 1024 * 1024" | bc -l)
-
-    if (( $(echo "$NEW_USED_BYTES >= $max_bytes" | bc -l) )); then
-        echo -e "${RED}Monthly quota of ${TOTAL_TB}TB reached. Throttling to minimum speed...${PLAIN}"
-        tc qdisc del dev "$INTERFACE" root 2>/dev/null
-        tc qdisc add dev "$INTERFACE" root handle 1: htb default 10
-        tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "1kbit"
-    fi
-}
-
 # Create systemd service
 create_service() {
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=V2RayZone Bandwidth Limiter
 After=network.target
+
 [Service]
 Type=simple
 ExecStartPre=/bin/bash -c 'sleep 3 && $SCRIPT_PATH --enforce-quota'
@@ -210,6 +210,7 @@ ExecStart=$SCRIPT_PATH --start
 ExecStop=$SCRIPT_PATH --stop
 Restart=on-failure
 RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -236,7 +237,6 @@ install_script() {
     cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
     touch "$LOG_FILE"
     chown root:root "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
     create_service
     create_command_shortcut
     echo -e "${GREEN}Script installed successfully. Run 'v2bwl' to launch.${PLAIN}"
@@ -266,6 +266,7 @@ uninstall() {
     rm -fv "$CONFIG_FILE"
     rm -fv "$USAGE_LOG"
     rm -fv "/usr/local/bin/v2bwl"
+
     systemctl daemon-reload
     echo -e "${GREEN}Limiter uninstalled successfully.${PLAIN}"
 }
@@ -280,23 +281,19 @@ configure_bandwidth() {
         read -p "Enter total TB allocation for this VPS: " total_tb
     done
 
-    read -p "Enter number of days for this plan: " plan_days
-    while ! [[ "$plan_days" =~ ^[0-9]+$ ]]; do
+    read -p "Enter the number of days this VPS has been running: " days_running
+    while ! [[ "$days_running" =~ ^[0-9]+$ ]]; do
         echo -e "${RED}Please enter a valid integer${PLAIN}"
-        read -p "Enter number of days for this plan: " plan_days
+        read -p "Enter number of days running: " days_running
     done
 
-    start_date=$(date +"%Y-%m-%d")
+    start_date=$(date -d "$days_running days ago" +"%Y-%m-%d")
     days_elapsed=$(calculate_days_elapsed "$start_date")
-    days_remaining=$(calculate_days_remaining "$start_date")
-
     recommended_speed=$(calculate_speed_limit "$total_tb" "$days_elapsed")
 
     echo -e "${YELLOW}Based on input:${PLAIN}"
     echo -e "Total allocation: ${total_tb}TB"
-    echo -e "Plan duration: ${plan_days} days"
-    echo -e "Start date: ${start_date}"
-    echo -e "Days remaining: ${days_remaining}"
+    echo -e "Running for: $days_elapsed days"
     echo -e "Recommended speed: ${recommended_speed}Mbps"
 
     read -p "Use recommended speed? (y/n): " use_recommended
@@ -321,18 +318,20 @@ configure_bandwidth() {
 view_settings() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        source "$USAGE_LOG"
         if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$INTERFACE" ]]; then
             echo -e "${RED}Incomplete configuration found${PLAIN}"
             STATUS="incomplete"
             return 1
         fi
 
-        source "$USAGE_LOG"
-        days_elapsed=$(calculate_days_elapsed "$START_DATE")
-        days_remaining=$(calculate_days_remaining "$START_DATE")
-        recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed")
-        used_tb=$(echo "scale=2; $USED_BYTES / 1024 / 1024 / 1024 / 1024" | bc)
-        remaining_tb=$(echo "scale=2; $TOTAL_TB - $used_tb" | bc)
+        local days_elapsed=$(calculate_days_elapsed "$START_DATE")
+        local days_remaining=$(( 30 - days_elapsed ))
+        [[ "$days_remaining" -lt 0 ]] && days_remaining=0
+
+        local recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed")
+        local used_tb=$(echo "scale=2; $USED_BYTES / 1024 / 1024 / 1024 / 1024" | bc)
+        local remaining_tb=$(echo "$TOTAL_TB - $used_tb" | bc)
 
         echo -e "${BLUE}=== Current Settings ===${PLAIN}"
         echo -e "Total allocation: ${TOTAL_TB}TB"
@@ -377,6 +376,7 @@ view_settings() {
 # Start limiter
 start_limiter() {
     source "$CONFIG_FILE" 2>/dev/null || { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
+    source "$USAGE_LOG"
     track_and_enforce_usage
     apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     systemctl enable --now v2rayzone-bandwidth-limiter
@@ -483,6 +483,7 @@ main() {
 if [[ "$1" == "--start" ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        source "$USAGE_LOG"
         track_and_enforce_usage
         apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     else
