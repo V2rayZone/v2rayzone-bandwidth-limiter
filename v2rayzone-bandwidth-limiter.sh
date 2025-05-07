@@ -1,7 +1,7 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.1 - FINAL VERSION
+# V2RayZone Bandwidth Limiter v2.2 - FINAL VERSION WITH AUTO-RESET
 # Author: V2RayZone
-# Description: A script to limit bandwidth + enforce monthly quota on Ubuntu VPS
+# Description: A script to limit bandwidth + enforce monthly/plan-based quota on Ubuntu VPS
 # Colors
 RED="\033[31m"
 GREEN="\033[32m"
@@ -17,21 +17,13 @@ if [[ -f "$LOCK_FILE" ]]; then
     USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
     SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
     SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-    fi
+    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
     if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
         systemctl stop v2rayzone-bandwidth-limiter
     fi
     INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
-    if [ -n "$INTERFACE" ]; then
-        tc qdisc del dev "$INTERFACE" root 2>/dev/null
-    fi
-    rm -fv "$CONFIG_FILE"
-    rm -fv "$USAGE_LOG"
-    rm -fv "$SERVICE_FILE"
-    rm -fv "$SCRIPT_PATH"
-    rm -fv "/usr/local/bin/v2bwl"
+    [[ -n "$INTERFACE" ]] && tc qdisc del dev "$INTERFACE" root 2>/dev/null
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH" "/usr/local/bin/v2bwl"
     systemctl daemon-reload
     echo -e "${GREEN}Old configuration cleaned up successfully.${PLAIN}"
 fi
@@ -68,21 +60,16 @@ SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
 LOG_FILE="/var/log/v2rayzone-bandwidth-limiter.log"
 INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
 STATUS="stopped"
-
-# Ensure log directory exists
-mkdir -p "$(dirname "$LOG_FILE")"
-mkdir -p "$(dirname "$USAGE_LOG")"
+mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$USAGE_LOG")"
 
 # Create usage log if missing
-if [[ ! -f "$USAGE_LOG" ]]; then
-    echo "USED_BYTES=0" > "$USAGE_LOG"
-fi
+[[ ! -f "$USAGE_LOG" ]] && echo "USED_BYTES=0" > "$USAGE_LOG"
 
 # Load configuration if exists
 if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
     source "$USAGE_LOG"
-    if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" ]]; then
+    if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$PLAN_DAYS" ]]; then
         echo -e "${YELLOW}Configuration file is incomplete, reconfiguring...${PLAIN}"
     else
         STATUS="configured"
@@ -90,9 +77,7 @@ if [[ -f "$CONFIG_FILE" ]]; then
 fi
 
 # Check systemd status
-if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-    STATUS="running"
-fi
+systemctl is-active --quiet v2rayzone-bandwidth-limiter && STATUS="running"
 
 # Function to calculate days elapsed from start date
 calculate_days_elapsed() {
@@ -103,17 +88,17 @@ calculate_days_elapsed() {
         echo -e "${RED}Invalid date format:${start_date}${PLAIN}"
         return 1
     fi
-    local days_diff=$(( (current_date - start_timestamp) / 86400 ))
-    echo "$days_diff"
+    echo "$(( (current_date - start_timestamp) / 86400 ))"
 }
 
-# Function to calculate days remaining from start date
-calculate_days_remaining() {
+# Function to calculate days remaining from plan duration
+calculate_days_remaining_in_plan() {
     local start_date="$1"
-    local end_of_month=$(date -d "$start_date +1 month -1 day" "+%Y-%m-%d")
-    local end_timestamp=$(date -d "$end_of_month 23:59:59" "+%s")
+    local plan_days="$2"
+    local start_timestamp=$(date -d "$start_date" "+%s")
+    local end_timestamp=$((start_timestamp + (plan_days * 86400))
     local current_date=$(date +%s)
-    local days_left=$(( (end_timestamp - current_date + 86399) / 86400 )) # +86399 to round up
+    local days_left=$(( (end_timestamp - current_date + 86399) / 86400 ))
     echo "$((days_left >= 0 ? days_left : 0))"
 }
 
@@ -121,12 +106,13 @@ calculate_days_remaining() {
 calculate_speed_limit() {
     local total_tb="$1"
     local days_elapsed="$2"
+    local plan_days="$3"
     local current_day=$(date +%d)
     local month_end_day=$(date -d "$current_day +1 month -$(date +%d) days" +%d)
     local remaining_days=$((month_end_day - current_day + 1))
     [[ "$remaining_days" -le 0 ]] && remaining_days=1
     local total_bytes=$(echo "scale=2; $total_tb * 1024 * 1024 * 1024 * 1024" | bc -l)
-    local bytes_used=$(cat "$USAGE_LOG" | grep -oP 'USED_BYTES=\K[0-9]+')
+    local bytes_used=$(grep -oP 'USED_BYTES=\K[0-9]+' "$USAGE_LOG")
     [[ -z "$bytes_used" ]] && bytes_used=0
     local bytes_remaining=$(echo "scale=2; $total_bytes - $bytes_used" | bc -l)
     [[ "$bytes_remaining" == "0" || "$bytes_remaining" == "0.00" || "$bytes_remaining" -lt 0 ]] && bytes_remaining=1
@@ -140,22 +126,16 @@ calculate_speed_limit() {
 apply_bandwidth_limit() {
     local speed_limit="$1"
     local interface="$2"
-    if [[ -z "$interface" ]]; then
-        echo -e "${RED}No network interface detected. Cannot apply limit.${PLAIN}"
-        return 1
-    fi
+    [[ -z "$interface" ]] && { echo -e "${RED}No network interface detected. Cannot apply limit.${PLAIN}" ; return 1; }
     local kbps=$(echo "scale=0; $speed_limit * 1024" | bc -l)
     echo -e "${YELLOW}Removing old rules from interface: $interface${PLAIN}"
     tc qdisc del dev "$interface" root 2>/dev/null
     echo -e "${YELLOW}Applying new limit: ${speed_limit}Mbps${PLAIN}"
-    if ! tc qdisc add dev "$interface" root handle 1: htb default 10; then
-        echo -e "${RED}Failed to apply QDisc. Aborting bandwidth limit application.${PLAIN}"
+    tc qdisc add dev "$interface" root handle 1: htb default 10 && \
+    tc class add dev "$interface" parent 1: classid 1:10 htb rate "${kbps}kbit" || {
+        echo -e "${RED}Failed to apply bandwidth limit${PLAIN}"
         return 1
-    fi
-    if ! tc class add dev "$interface" parent 1: classid 1:10 htb rate "${kbps}kbit"; then
-        echo -e "${RED}Failed to apply HTB class. Aborting.${PLAIN}"
-        return 1
-    fi
+    }
     echo "$(date): Applied bandwidth limit of ${speed_limit}Mbps to interface $interface" >> "$LOG_FILE"
     echo -e "${GREEN}Bandwidth limit of ${speed_limit}Mbps applied successfully${PLAIN}"
 }
@@ -175,26 +155,29 @@ save_configuration() {
     local total_tb="$1"
     local start_date="$2"
     local speed_limit="$3"
-    echo "TOTAL_TB=\"${total_tb}\"" > "$CONFIG_FILE"
-    echo "START_DATE=\"${start_date}\"" >> "$CONFIG_FILE"
-    echo "SPEED_LIMIT=\"${speed_limit}\"" >> "$CONFIG_FILE"
-    echo "INTERFACE=\"${INTERFACE}\"" >> "$CONFIG_FILE"
-    echo "$(date): Configuration saved - Total: ${total_tb}TB, Start Date: ${start_date}, Speed Limit: ${speed_limit}Mbps" >> "$LOG_FILE"
+    local plan_days="$4"
+    echo "TOTAL_TB=\"$total_tb\"" > "$CONFIG_FILE"
+    echo "START_DATE=\"$start_date\"" >> "$CONFIG_FILE"
+    echo "SPEED_LIMIT=\"$speed_limit\"" >> "$CONFIG_FILE"
+    echo "INTERFACE=\"$INTERFACE\"" >> "$CONFIG_FILE"
+    echo "PLAN_DAYS=\"$plan_days\"" >> "$CONFIG_FILE"
+    echo "$(date): Configuration saved - Total: ${total_tb}TB, Start Date: ${start_date}, Speed Limit: ${speed_limit}Mbps, Plan Days: ${plan_days}" >> "$LOG_FILE"
     echo -e "${GREEN}Configuration saved successfully${PLAIN}"
 }
 
 # Track outbound usage and enforce cap
 track_and_enforce_usage() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${RED}No config found. Cannot track usage.${PLAIN}"
-        exit 1
-    fi
+    [[ ! -f "$CONFIG_FILE" ]] && { echo -e "${RED}No config found. Cannot track usage.${PLAIN}" ; exit 1; }
     source "$CONFIG_FILE"
     source "$USAGE_LOG"
     tx_bytes=$(grep "$INTERFACE" /proc/net/dev | awk '{print $10}')
     NEW_USED_BYTES=$(echo "$USED_BYTES + $tx_bytes" | bc)
     echo "USED_BYTES=$NEW_USED_BYTES" > "$USAGE_LOG"
     max_bytes=$(echo "$TOTAL_TB * 1024 * 1024 * 1024 * 1024" | bc -l)
+
+    # Reset plan if expired
+    reset_plan_if_expired
+
     if (( $(echo "$NEW_USED_BYTES >= $max_bytes" | bc -l) )); then
         echo -e "${RED}Monthly quota of ${TOTAL_TB}TB reached. Throttling to minimum speed...${PLAIN}"
         tc qdisc del dev "$INTERFACE" root 2>/dev/null
@@ -203,6 +186,29 @@ track_and_enforce_usage() {
     else
         echo -e "${YELLOW}Reapplying configured bandwidth limit: ${SPEED_LIMIT}Mbps${PLAIN}"
         apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    fi
+}
+
+# Auto/manual reset quota
+reset_plan_if_expired() {
+    [[ ! -f "$CONFIG_FILE" ]] && return 1
+    source "$CONFIG_FILE"
+    source "$USAGE_LOG"
+
+    start_timestamp=$(date -d "$START_DATE" "+%s")
+    end_timestamp=$((start_timestamp + (PLAN_DAYS * 86400))
+    current_timestamp=$(date +%s)
+
+    if (( current_timestamp >= end_timestamp )); then
+        echo -e "${YELLOW}Plan period has ended. Automatically resetting quota...${PLAIN}"
+        START_DATE=$(date +"%Y-%m-%d")
+        PLAN_DAYS="$PLAN_DAYS"
+        echo "USED_BYTES=0" > "$USAGE_LOG"
+        save_configuration "$TOTAL_TB" "$START_DATE" "$SPEED_LIMIT" "$PLAN_DAYS"
+        apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+        echo -e "${GREEN}Quota has been auto-reset for another $PLAN_DAYS days starting on $(date +%F)${PLAIN}"
+    else
+        echo -e "${GREEN}Plan still active. No reset needed.${PLAIN}"
     fi
 }
 
@@ -265,11 +271,7 @@ uninstall() {
     systemctl disable v2rayzone-bandwidth-limiter 2>/dev/null
     INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
     [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
-    rm -fv "$SERVICE_FILE"
-    rm -fv "$SCRIPT_PATH"
-    rm -fv "$CONFIG_FILE"
-    rm -fv "$USAGE_LOG"
-    rm -fv "/usr/local/bin/v2bwl"
+    rm -fv "$SERVICE_FILE" "$SCRIPT_PATH" "$CONFIG_FILE" "$USAGE_LOG" "/usr/local/bin/v2bwl"
     systemctl daemon-reload
     echo -e "${GREEN}Limiter uninstalled successfully.${PLAIN}"
 }
@@ -287,14 +289,14 @@ configure_bandwidth() {
         read -p "Enter total TB allocation for this VPS: " total_tb
     done
     read -p "Enter number of days for this plan: " plan_days
-    while ! [[ "$plan_days" =~ ^[0-9]+$ ]]; do
-        echo -e "${RED}Please enter a valid integer${PLAIN}"
+    while ! [[ "$plan_days" =~ ^[0-9]+$ && "$plan_days" -gt 0 ]]; do
+        echo -e "${RED}Please enter a valid integer greater than zero.${PLAIN}"
         read -p "Enter number of days for this plan: " plan_days
     done
     start_date=$(date +"%Y-%m-%d")
     days_elapsed=$(calculate_days_elapsed "$start_date")
-    days_remaining=$(calculate_days_remaining "$start_date")
-    recommended_speed=$(calculate_speed_limit "$total_tb" "$days_elapsed")
+    days_remaining=$(calculate_days_remaining_in_plan "$start_date" "$plan_days")
+    recommended_speed=$(calculate_speed_limit "$total_tb" "$days_elapsed" "$plan_days")
     echo -e "${YELLOW}Based on input:${PLAIN}"
     echo -e "Total allocation: ${total_tb}TB"
     echo -e "Plan duration: ${plan_days} days"
@@ -315,7 +317,7 @@ configure_bandwidth() {
             read -p "Enter desired speed in Mbps: " speed_limit
         done
     fi
-    save_configuration "$total_tb" "$start_date" "$speed_limit"
+    save_configuration "$total_tb" "$start_date" "$speed_limit" "$plan_days"
     apply_bandwidth_limit "$speed_limit" "$INTERFACE"
     echo "USED_BYTES=0" > "$USAGE_LOG"
     STATUS="configured"
@@ -326,15 +328,15 @@ configure_bandwidth() {
 view_settings() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$INTERFACE" ]]; then
+        if [[ -z "$TOTAL_TB" || -z "$START_DATE" || -z "$SPEED_LIMIT" || -z "$INTERFACE" || -z "$PLAN_DAYS" ]]; then
             echo -e "${RED}Incomplete configuration found${PLAIN}"
             STATUS="incomplete"
             return 1
         fi
         source "$USAGE_LOG"
         days_elapsed=$(calculate_days_elapsed "$START_DATE")
-        days_remaining=$(calculate_days_remaining "$START_DATE")
-        recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed")
+        days_remaining=$(calculate_days_remaining_in_plan "$START_DATE" "$PLAN_DAYS")
+        recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed" "$PLAN_DAYS")
         used_tb=$(echo "scale=2; $USED_BYTES / 1024 / 1024 / 1024 / 1024" | bc)
         remaining_tb=$(echo "scale=2; $TOTAL_TB - $used_tb" | bc)
         echo -e "${BLUE}=== Current Settings ===${PLAIN}"
@@ -342,6 +344,7 @@ view_settings() {
         echo -e "Used: ${used_tb}TB"
         echo -e "Remaining: ${remaining_tb}TB"
         echo -e "Start date: ${START_DATE}"
+        echo -e "Plan duration: ${PLAN_DAYS} days"
         echo -e "Days remaining: ${days_remaining}"
         echo -e "Current speed limit: ${SPEED_LIMIT}Mbps"
         echo -e "Recommended speed: ${recommended_speed}Mbps"
@@ -360,6 +363,7 @@ view_settings() {
                 START_DATE=""
                 SPEED_LIMIT=""
                 INTERFACE=""
+                PLAN_DAYS=""
                 STATUS="stopped"
                 echo -e "${GREEN}Configuration deleted successfully${PLAIN}"
                 ;;
@@ -377,7 +381,10 @@ view_settings() {
 
 # Start limiter
 start_limiter() {
-    source "$CONFIG_FILE" 2>/dev/null || { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
+    [[ ! -f "$CONFIG_FILE" ]] && { echo -e "${RED}No configuration found. Please configure first.${PLAIN}" ; return 1; }
+    source "$CONFIG_FILE"
+    source "$USAGE_LOG"
+    reset_plan_if_expired
     track_and_enforce_usage
     apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     systemctl enable --now v2rayzone-bandwidth-limiter
@@ -390,7 +397,7 @@ stop_limiter() {
     systemctl stop v2rayzone-bandwidth-limiter
     remove_bandwidth_limit "$INTERFACE"
     STATUS="configured"
-    echo -e "${GREEN}Limiter stopped successfully.${PLAIN}"
+    echo -e "${GREEN}Limiter stopped successfully${PLAIN}"
 }
 
 # Restart limiter
@@ -402,13 +409,7 @@ restart_limiter() {
 
 # Check status
 check_status() {
-    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-        echo -e "${GREEN}Limiter is running${PLAIN}"
-        STATUS="running"
-    else
-        echo -e "${RED}Limiter is NOT running${PLAIN}"
-        STATUS="configured"
-    fi
+    systemctl is-active --quiet v2rayzone-bandwidth-limiter && echo -e "${GREEN}Limiter is running${PLAIN}" || echo -e "${RED}Limiter is NOT running${PLAIN}"
     view_settings
 }
 
@@ -438,6 +439,7 @@ show_menu() {
     echo -e "${GREEN}---- Bandwidth Management ----${PLAIN}"
     echo -e "3. Set Bandwidth Limit"
     echo -e "4. View Current Settings"
+    echo -e "10. Reset Quota Manually"
     echo -e ""
     echo -e "${GREEN}---- Service Control ----${PLAIN}"
     echo -e "5. Start Limiter"
@@ -454,7 +456,23 @@ show_menu() {
         echo -e "Auto-start: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
     fi
     echo -e ""
-    read -p "Please enter your selection [0-9]: " choice
+    read -p "Please enter your selection [0-10]: " choice
+}
+
+# Manual reset function
+reset_quota_manually() {
+    echo -e "${YELLOW}Manually resetting quota...${PLAIN}"
+    read -p "Enter new plan duration in days (e.g., 30): " new_plan_days
+    while ! [[ "$new_plan_days" =~ ^[0-9]+$ && "$new_plan_days" -gt 0 ]]; do
+        echo -e "${RED}Please enter a valid integer greater than zero.${PLAIN}"
+        read -p "Enter new plan duration in days: " new_plan_days
+    done
+    source "$CONFIG_FILE"
+    START_DATE=$(date +"%Y-%m-%d")
+    echo "USED_BYTES=0" > "$USAGE_LOG"
+    save_configuration "$TOTAL_TB" "$START_DATE" "$SPEED_LIMIT" "$new_plan_days"
+    apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    echo -e "${GREEN}Quota has been manually reset for $new_plan_days days starting from $(date +%F)${PLAIN}"
 }
 
 # Main loop
@@ -471,6 +489,7 @@ main() {
             7) restart_limiter ;;
             8) check_status ;;
             9) view_logs ;;
+            10) reset_quota_manually ;;
             0) exit 0 ;;
             *) echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
         esac
@@ -489,17 +508,16 @@ if [[ "$1" == "--start" ]]; then
         exit 1
     fi
     exit 0
-fi
-if [[ "$1" == "--stop" ]]; then
+elif [[ "$1" == "--stop" ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
         remove_bandwidth_limit "$INTERFACE"
     fi
     exit 0
-fi
-if [[ "$1" == "--enforce-quota" ]]; then
+elif [[ "$1" == "--enforce-quota" ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        reset_plan_if_expired
         track_and_enforce_usage
     fi
     exit 0
