@@ -1,7 +1,7 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.4 - FINAL VERSION WITH AMS SHORTCUT & DAILY CRON
+# V2RayZone Bandwidth Limiter v2.4 - FINAL LOGIC FILE
 # Author: V2RayZone
-# Description: A script to limit bandwidth + enforce monthly quota on Ubuntu VPS
+# Description: Core logic for bandwidth limiting and quota tracking
 # Colors
 RED="\033[31m"
 GREEN="\033[32m"
@@ -23,7 +23,7 @@ if [[ -f "$LOCK_FILE" ]]; then
     fi
     INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
     [[ -n "$INTERFACE" ]] && tc qdisc del dev "$INTERFACE" root 2>/dev/null
-    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH"
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH" "/usr/local/bin/v2bwl"
     systemctl daemon-reload
     echo -e "${GREEN}Old configuration cleaned up successfully.${PLAIN}"
 fi
@@ -55,8 +55,6 @@ fi
 # Variables
 CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
 USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
-SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
-SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
 LOG_FILE="/var/log/v2rayzone-bandwidth-limiter.log"
 INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
 STATUS="stopped"
@@ -89,17 +87,6 @@ calculate_days_elapsed() {
         return 1
     fi
     echo "$(( (current_date - start_timestamp) / 86400 ))"
-}
-
-# Function to calculate days remaining in plan
-calculate_days_remaining_in_plan() {
-    local start_date="$1"
-    local plan_days="$2"
-    local start_timestamp=$(date -d "$start_date" "+%s")
-    local end_timestamp=$((start_timestamp + plan_days * 86400))
-    local current_date=$(date +%s)
-    local days_left=$(( (end_timestamp - current_date + 86399) / 86400 ))
-    echo "$((days_left >= 0 ? days_left : 0))"
 }
 
 # Function to calculate recommended speed limit
@@ -190,7 +177,6 @@ reset_plan_if_expired() {
     [[ ! -f "$CONFIG_FILE" ]] && return 1
     source "$CONFIG_FILE"
     source "$USAGE_LOG"
-
     start_timestamp=$(date -d "$START_DATE" "+%s")
     end_timestamp=$((start_timestamp + PLAN_DAYS * 86400))
     current_timestamp=$(date +%s)
@@ -205,59 +191,6 @@ reset_plan_if_expired() {
     else
         echo -e "${GREEN}Plan still active. No reset needed.${PLAIN}"
     fi
-}
-
-# Create systemd service
-create_service() {
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=V2RayZone Bandwidth Limiter
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-ExecStartPre=-$SCRIPT_PATH --enforce-quota
-ExecStart=$SCRIPT_PATH --start
-ExecStop=$SCRIPT_PATH --stop
-Restart=on-failure
-RestartSec=5
-StandardInput=null
-StandardOutput=null
-StandardError=null
-TimeoutStartSec=30s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable v2rayzone-bandwidth-limiter
-    echo "$(date): Systemd service created and enabled" >> "$LOG_FILE"
-}
-
-# Install script
-install_script() {
-    cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
-    touch "$LOG_FILE"
-    chown root:root "$LOG_FILE"
-    chmod 600 "$LOG_FILE"
-    create_service
-    echo -e "${GREEN}Script installed successfully. Run manually or use global command later.${PLAIN}"
-}
-
-# Uninstall
-uninstall() {
-    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
-    read -p "Type 'yes' to confirm: " confirm
-    [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
-    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-        systemctl stop v2rayzone-bandwidth-limiter
-    fi
-    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
-    [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
-    rm -fv "$SERVICE_FILE" "$SCRIPT_PATH" "$CONFIG_FILE" "$USAGE_LOG"
-    systemctl daemon-reload
-    echo -e "${GREEN}Limiter uninstalled successfully.${PLAIN}"
 }
 
 # Configure bandwidth
@@ -404,6 +337,22 @@ view_logs() {
     fi
 }
 
+# Manual reset function
+reset_quota_manually() {
+    echo -e "${YELLOW}Manually resetting quota...${PLAIN}"
+    read -p "Enter new plan duration in days (e.g., 30): " new_plan_days
+    while ! [[ "$new_plan_days" =~ ^[0-9]+$ && "$new_plan_days" -gt 0 ]]; do
+        echo -e "${RED}Please enter a valid integer greater than zero.${PLAIN}"
+        read -p "Enter new plan duration in days: " new_plan_days
+    done
+    source "$CONFIG_FILE"
+    START_DATE=$(date +"%Y-%m-%d")
+    echo "USED_BYTES=0" > "$USAGE_LOG"
+    save_configuration "$TOTAL_TB" "$START_DATE" "$SPEED_LIMIT" "$new_plan_days"
+    apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
+    echo -e "${GREEN}Quota has been manually reset for $new_plan_days days starting from $(date +%F)${PLAIN}"
+}
+
 # Show main menu
 show_menu() {
     clear
@@ -430,6 +379,9 @@ show_menu() {
     echo -e "0. Exit"
     echo -e ""
     echo -e "Panel status: ${STATUS}"
+    if [[ "$STATUS" != "stopped" ]]; then
+        echo -e "Auto-start: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
+    fi
     echo -e ""
     read -p "Please enter your selection [0-10]: " choice
 }
@@ -462,56 +414,30 @@ elif [[ "$1" == "--enforce-quota" ]]; then
     exit 0
 fi
 
-# Manual reset function
-reset_quota_manually() {
-    echo -e "${YELLOW}Manually resetting quota...${PLAIN}"
-    read -p "Enter new plan duration in days (e.g., 30): " new_plan_days
-    while ! [[ "$new_plan_days" =~ ^[0-9]+$ && "$new_plan_days" -gt 0 ]]; do
-        echo -e "${RED}Please enter a valid integer greater than zero.${PLAIN}"
-        read -p "Enter new plan duration in days: " new_plan_days
-    done
-    source "$CONFIG_FILE"
-    START_DATE=$(date +"%Y-%m-%d")
-    echo "USED_BYTES=0" > "$USAGE_LOG"
-    save_configuration "$TOTAL_TB" "$START_DATE" "$SPEED_LIMIT" "$new_plan_days"
-    apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
-    echo -e "${GREEN}Quota has been manually reset for $new_plan_days days starting from $(date +%F)${PLAIN}"
+# Calculate days remaining in plan
+calculate_days_remaining_in_plan() {
+    local start_date="$1"
+    local plan_days="$2"
+    local start_timestamp=$(date -d "$start_date" "+%s")
+    local end_timestamp=$((start_timestamp + plan_days * 86400))
+    local current_date=$(date +%s)
+    local days_left=$(( (end_timestamp - current_date + 86399 ) / 86400 ))
+    echo "$((days_left >= 0 ? days_left : 0))"
 }
 
-# Ask user to create global 'ams' command at exit
-setup_global_alias() {
-    echo -e "${YELLOW}Would you like to create 'ams' command for easy access? (y/n)${PLAIN}"
-    read -r -p "> " add_alias
-
-    if [[ "$add_alias" =~ ^[Yy]$ ]]; then
-        # Ensure target directory exists
-        mkdir -p /root/ams/
-        
-        # Copy current script to /root/ams/
-        cp "$0" /root/ams/v2rayzone-bandwidth-limiter.sh
-        chmod +x /root/ams/v2rayzone-bandwidth-limiter.sh
-
-        # Create symlink only if not exists
-        if [ ! -f "/usr/local/bin/ams" ]; then
-            sudo ln -s /root/ams/v2rayzone-bandwidth-limiter.sh /usr/local/bin/ams
-            echo -e "${GREEN}AMS global command created: type 'ams' anytime!${PLAIN}"
-        else
-            echo -e "${YELLOW}'ams' command already exists.${PLAIN}"
-        fi
-    else
-        echo -e "${BLUE}Global command skipped. You can manually set it later.${PLAIN}"
+# Uninstall function
+uninstall() {
+    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
+    read -p "Type 'yes' to confirm: " confirm
+    [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
+    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+        systemctl stop v2rayzone-bandwidth-limiter
     fi
-}
-
-# Add Cron Job for Daily Enforcement
-add_daily_cron() {
-    local cron_job="0 0 * * * root /usr/local/bin/v2rayzone-bandwidth-limiter.sh --enforce-quota"
-    if ! grep -q "v2rayzone-bandwidth-limiter.sh --enforce-quota" /etc/crontab 2>/dev/null; then
-        echo "$cron_job" >> /etc/crontab
-        echo -e "${GREEN}Daily enforcement cron job added${PLAIN}"
-    else
-        echo -e "${GREEN}Daily enforcement already configured${PLAIN}"
-    fi
+    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
+    [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG"
+    systemctl daemon-reload
+    echo -e "${GREEN}Limiter uninstalled successfully.${PLAIN}"
 }
 
 # Main loop
@@ -529,18 +455,11 @@ main() {
             8) check_status ;;
             9) view_logs ;;
             10) reset_quota_manually ;;
-            0)  setup_global_alias
-                exit 0
-                ;;
-            *)
-               echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
-    esac
+            0) exit 0 ;;
+            *) echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
+        esac
         read -rsp $'\nPress any key to continue...' -n1 key
     done
 }
 
-# Add daily cron job
-add_daily_cron
-
-# Launch app
 main
