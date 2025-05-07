@@ -9,39 +9,6 @@ YELLOW="\033[33m"
 BLUE="\033[36m"
 PLAIN="\033[0m"
 
-# Lock file to prevent multiple instances
-LOCK_FILE="/var/lock/v2rayzone-bandwidth-limiter.lock"
-if [[ -f "$LOCK_FILE" ]]; then
-    echo -e "${YELLOW}Another instance detected. Cleaning up old configuration...${PLAIN}"
-    CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
-    USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
-    SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
-    SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
-    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
-    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-        systemctl stop v2rayzone-bandwidth-limiter
-    fi
-    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
-    [[ -n "$INTERFACE" ]] && tc qdisc del dev "$INTERFACE" root 2>/dev/null
-    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH" "/usr/local/bin/v2bwl"
-    systemctl daemon-reload
-    echo -e "${GREEN}Old configuration cleaned up successfully.${PLAIN}"
-fi
-touch "$LOCK_FILE"
-trap "rm -f $LOCK_FILE" EXIT
-
-# Check if root
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}This script must be run as root${PLAIN}"
-    exit 1
-fi
-
-# Install iproute2 if missing
-if ! command -v tc &> /dev/null; then
-    echo -e "${YELLOW}Installing traffic control tools...${PLAIN}"
-    apt-get update && apt-get install -y iproute2
-fi
-
 # Variables
 CONFIG_FILE="/etc/v2rayzone-bandwidth-limiter.conf"
 USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
@@ -140,7 +107,7 @@ track_and_enforce_usage() {
     echo "USED_BYTES=$NEW_USED_BYTES" > "$USAGE_LOG"
     max_bytes=$(echo "$TOTAL_TB * 1024 * 1024 * 1024 * 1024" | bc -l)
 
-    # Auto-reset if expired
+    # Reset plan if expired
     reset_plan_if_expired
 
     if (( $(echo "$NEW_USED_BYTES >= $max_bytes" | bc -l) )); then
@@ -310,19 +277,6 @@ check_status() {
     view_settings
 }
 
-# View logs
-view_logs() {
-    if [[ -f "$LOG_FILE" ]]; then
-        echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
-        tail -n 50 "$LOG_FILE"
-        echo ""
-        read -p "Press Enter to continue..."
-    else
-        echo -e "${YELLOW}No logs found.${PLAIN}"
-        sleep 2
-    fi
-}
-
 # Manual reset function
 reset_quota_manually() {
     echo -e "${YELLOW}Manually resetting quota...${PLAIN}"
@@ -398,10 +352,6 @@ show_menu() {
     echo -e "${BLUE}======================================${PLAIN}"
     echo -e "${BLUE} V2RayZone Bandwidth Limiter ${PLAIN}"
     echo -e "${BLUE}======================================${PLAIN}"
-    echo -e "${GREEN}---- Installation ----${PLAIN}"
-    echo -e "1. Install"
-    echo -e "2. Uninstall"
-    echo -e ""
     echo -e "${GREEN}---- Bandwidth Management ----${PLAIN}"
     echo -e "3. Set Bandwidth Limit"
     echo -e "4. View Current Settings"
@@ -418,8 +368,38 @@ show_menu() {
     echo -e "0. Exit"
     echo -e ""
     echo -e "Panel status: ${STATUS}"
+    if [[ "$STATUS" != "stopped" ]]; then
+        echo -e "Auto-start: $(systemctl is-enabled v2rayzone-bandwidth-limiter 2>/dev/null || echo "No")"
+    fi
     echo -e ""
     read -p "Please enter your selection [0-10]: " choice
+}
+
+# View logs
+view_logs() {
+    if [[ -f "$LOG_FILE" ]]; then
+        echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
+        tail -n 50 "$LOG_FILE"
+        echo ""
+        read -p "Press Enter to continue..."
+    else
+        echo -e "${YELLOW}No logs found.${PLAIN}"
+        sleep 2
+    fi
+}
+
+# Uninstall function (just cleans up files)
+uninstall() {
+    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
+    read -p "Type 'yes' to confirm: " confirm
+    [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
+    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+        systemctl stop v2rayzone-bandwidth-limiter
+    fi
+    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
+    [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$LOG_FILE"
+    echo -e "${GREEN}Configuration and logs deleted successfully${PLAIN}"
 }
 
 # Main loop
@@ -427,8 +407,6 @@ main() {
     while true; do
         show_menu
         case "$choice" in
-            1) install_script && configure_bandwidth ;;
-            2) uninstall ;;
             3) configure_bandwidth ;;
             4) view_settings ;;
             5) start_limiter ;;
