@@ -187,6 +187,7 @@ configure_bandwidth() {
             read -p "Enter desired speed in Mbps: " speed_limit
         done
     fi
+
     save_configuration "$total_tb" "$start_date" "$speed_limit" "$plan_days"
     apply_bandwidth_limit "$speed_limit" "$INTERFACE"
     echo "USED_BYTES=0" > "$USAGE_LOG"
@@ -277,6 +278,19 @@ check_status() {
     view_settings
 }
 
+# View logs
+view_logs() {
+    if [[ -f "$LOG_FILE" ]]; then
+        echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
+        tail -n 50 "$LOG_FILE"
+        echo ""
+        read -p "Press Enter to continue..."
+    else
+        echo -e "${YELLOW}No logs found.${PLAIN}"
+        sleep 2
+    fi
+}
+
 # Manual reset function
 reset_quota_manually() {
     echo -e "${YELLOW}Manually resetting quota...${PLAIN}"
@@ -346,6 +360,26 @@ elif [[ "$1" == "--enforce-quota" ]]; then
     exit 0
 fi
 
+# Uninstall function
+uninstall() {
+    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
+    read -p "Type 'yes' to confirm: " confirm
+    [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
+
+    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
+        systemctl stop v2rayzone-bandwidth-limiter
+    fi
+
+    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
+    [[ -n "$INTERFACE" ]] && tc qdisc del dev "$INTERFACE" root 2>/dev/null
+
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$LOG_FILE"
+    systemctl disable v2rayzone-bandwidth-limiter --now
+    systemctl daemon-reload
+    rm -fv /usr/local/bin/ams
+    echo -e "${GREEN}All files and services removed successfully.${PLAIN}"
+}
+
 # Show main menu
 show_menu() {
     clear
@@ -373,33 +407,6 @@ show_menu() {
     fi
     echo -e ""
     read -p "Please enter your selection [0-10]: " choice
-}
-
-# View logs
-view_logs() {
-    if [[ -f "$LOG_FILE" ]]; then
-        echo -e "${BLUE}=== Last 50 Lines of Logs ===${PLAIN}"
-        tail -n 50 "$LOG_FILE"
-        echo ""
-        read -p "Press Enter to continue..."
-    else
-        echo -e "${YELLOW}No logs found.${PLAIN}"
-        sleep 2
-    fi
-}
-
-# Uninstall function (just cleans up files)
-uninstall() {
-    echo -e "${YELLOW}Are you sure you want to uninstall? All settings will be deleted!${PLAIN}"
-    read -p "Type 'yes' to confirm: " confirm
-    [[ "$confirm" != "yes" ]] && echo -e "${RED}Uninstall cancelled.${PLAIN}" && return 1
-    if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
-        systemctl stop v2rayzone-bandwidth-limiter
-    fi
-    INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
-    [[ -n "$INTERFACE" ]] && remove_bandwidth_limit "$INTERFACE"
-    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$LOG_FILE"
-    echo -e "${GREEN}Configuration and logs deleted successfully${PLAIN}"
 }
 
 # Main loop
