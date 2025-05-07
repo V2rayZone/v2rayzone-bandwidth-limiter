@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter Installer
+# V2RayZone Bandwidth Limiter - Installer Script
 # Author: V2RayZone
 
 # Colors
@@ -17,15 +17,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Install curl if missing
+# Ensure curl is installed
 if ! command -v curl &> /dev/null; then
     echo -e "${YELLOW}Installing curl...${PLAIN}"
     apt-get update && apt-get install -y curl
 fi
 
-# Download main script
+# Download latest version of main script
 SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
-echo -e "${YELLOW}Downloading latest version of limiter script...${PLAIN}"
+echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
 curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o "$SCRIPT_PATH"
 chmod +x "$SCRIPT_PATH"
 
@@ -39,15 +39,14 @@ Wants=network.target
 
 [Service]
 Type=simple
-ExecStartPre=-$SCRIPT_PATH --enforce-quota
 ExecStart=$SCRIPT_PATH --start
 ExecStop=$SCRIPT_PATH --stop
+ExecStartPre=-$SCRIPT_PATH --enforce-quota
 Restart=on-failure
 RestartSec=5
-StandardInput=null
-StandardOutput=null
-StandardError=null
-TimeoutStartSec=30s
+User=root
+WorkingDirectory=/root
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]
 WantedBy=multi-user.target
@@ -56,7 +55,7 @@ EOF
 systemctl daemon-reload
 systemctl enable v2rayzone-bandwidth-limiter
 
-# Create 'ams' shortcut
+# Create global command 'ams'
 AMS_SHORTCUT="/usr/local/bin/ams"
 if [[ ! -f "$AMS_SHORTCUT" ]]; then
     cat > "$AMS_SHORTCUT" << 'EOFX'
@@ -64,15 +63,14 @@ if [[ ! -f "$AMS_SHORTCUT" ]]; then
 /usr/local/bin/v2rayzone-bandwidth-limiter.sh "$@"
 EOFX
     chmod +x "$AMS_SHORTCUT"
-    echo -e "${GREEN}'ams' command created successfully.${PLAIN}"
+    echo -e "${GREEN}'ams' global command created successfully.${PLAIN}"
 else
     echo -e "${YELLOW}'ams' already exists. Skipping creation.${PLAIN}"
 fi
 
-# Add daily enforcement cron job
+# Add daily cron job
 (crontab -l 2>/dev/null | grep -v "v2rayzone-bandwidth-limiter") | \
   echo "0 0 * * * root $SCRIPT_PATH --enforce-quota" | crontab -
 
-# Success message
 echo -e "${GREEN}Installation completed successfully.${PLAIN}"
-echo -e "${YELLOW}Run 'ams' to launch the bandwidth limiter menu.${PLAIN}"
+echo -e "${YELLOW}Run 'ams' to access the menu.${PLAIN}"
