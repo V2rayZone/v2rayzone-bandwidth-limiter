@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # V2RayZone Bandwidth Limiter Installer
 # Author: V2RayZone
 
@@ -11,17 +10,22 @@ BLUE="\033[36m"
 PLAIN="\033[0m"
 
 echo -e "${BLUE}V2RayZone Bandwidth Limiter Installer${PLAIN}"
-echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
 
-# Check if curl is installed
-if ! command -v curl &> /dev/null; then
-    echo -e "${YELLOW}Installing curl...${PLAIN}"
-    apt-get update
-    apt-get install -y curl
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}This script must be run as root${PLAIN}"
+    exit 1
 fi
 
-# Download the main script
-curl -Ls https://raw.githubusercontent.com/V2RayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o v2rayzone-bandwidth-limiter.sh
+# Ensure curl is installed
+if ! command -v curl &> /dev/null; then
+    echo -e "${YELLOW}Installing curl...${PLAIN}"
+    apt-get update && apt-get install -y curl
+fi
+
+# Download the latest version
+echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
+curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o v2rayzone-bandwidth-limiter.sh
 
 # Make it executable
 chmod +x v2rayzone-bandwidth-limiter.sh
