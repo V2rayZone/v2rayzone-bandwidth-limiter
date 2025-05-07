@@ -1,6 +1,5 @@
 #!/bin/bash
 # V2RayZone Bandwidth Limiter Installer
-# Author: V2RayZone
 
 # Colors
 RED="\033[31m"
@@ -11,34 +10,25 @@ PLAIN="\033[0m"
 
 echo -e "${BLUE}V2RayZone Bandwidth Limiter Installer${PLAIN}"
 
-# Check if running as root
+# Ensure root
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}This script must be run as root${PLAIN}"
     exit 1
 fi
 
-# Ensure curl is installed
+# Install curl if missing
 if ! command -v curl &> /dev/null; then
     echo -e "${YELLOW}Installing curl...${PLAIN}"
     apt-get update && apt-get install -y curl
 fi
 
-# Download the main script
-echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
+# Download latest version
+echo -e "${YELLOW}Downloading latest version...${PLAIN}"
 curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o /usr/local/bin/v2rayzone-bandwidth-limiter.sh
 
-# Make sure it's executable
+# Make executable
 chmod +x /usr/local/bin/v2rayzone-bandwidth-limiter.sh
 
-# Create global shortcut 'v2bwl'
-cat > /usr/local/bin/v2bwl << 'EOF'
-#!/bin/bash
-/usr/local/bin/v2rayzone-bandwidth-limiter.sh "$@"
-EOF
-chmod +x /usr/local/bin/v2bwl
-
-# Output success message
-echo -e "${GREEN}Download completed. Starting the bandwidth limiter...${PLAIN}"
-
 # Run the script
+echo -e "${GREEN}Starting the bandwidth limiter...${PLAIN}"
 /usr/local/bin/v2rayzone-bandwidth-limiter.sh
