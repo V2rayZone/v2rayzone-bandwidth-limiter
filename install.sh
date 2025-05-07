@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter Installer
+# V2RayZone Bandwidth Limiter - Installer Script
 # Author: V2RayZone
 
 # Colors
@@ -19,14 +19,18 @@ if [[ -f "$LOCK_FILE" ]]; then
     USAGE_LOG="/var/lib/v2rayzone-bandwidth-limiter.usage"
     SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
     SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
+
     if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
     if systemctl is-active --quiet v2rayzone-bandwidth-limiter; then
         systemctl stop v2rayzone-bandwidth-limiter
     fi
+
     INTERFACE=$(ip -o -4 route show default | awk '{print $5}' | head -n1)
     [[ -n "$INTERFACE" ]] && tc qdisc del dev "$INTERFACE" root 2>/dev/null
-    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH" "/usr/local/bin/v2bwl"
+
+    rm -fv "$CONFIG_FILE" "$USAGE_LOG" "$SERVICE_FILE" "$SCRIPT_PATH" "/usr/local/bin/ams"
     systemctl daemon-reload
+
     echo -e "${GREEN}Old configuration cleaned up successfully.${PLAIN}"
 fi
 touch "$LOCK_FILE"
@@ -38,17 +42,16 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Install iproute2 if missing
-if ! command -v tc &> /dev/null; then
-    echo -e "${YELLOW}Installing traffic control tools...${PLAIN}"
-    apt-get update && apt-get install -y iproute2
+# Install curl if missing
+if ! command -v curl &> /dev/null; then
+    echo -e "${YELLOW}Installing curl...${PLAIN}"
+    apt-get update && apt-get install -y curl
 fi
 
-# Download latest version of main script
-MAIN_SCRIPT_URL="https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh"
+# Download main script
 SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
 echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
-curl -Ls "$MAIN_SCRIPT_URL" -o "$SCRIPT_PATH"
+curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o "$SCRIPT_PATH"
 chmod +x "$SCRIPT_PATH"
 
 # Create systemd service
@@ -66,8 +69,12 @@ ExecStop=$SCRIPT_PATH --stop
 ExecStartPre=-$SCRIPT_PATH --enforce-quota
 Restart=on-failure
 User=root
-Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 WorkingDirectory=/root
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+StandardInput=null
+StandardOutput=null
+StandardError=null
+TimeoutStartSec=30s
 
 [Install]
 WantedBy=multi-user.target
@@ -76,25 +83,23 @@ EOF
 systemctl daemon-reload
 systemctl enable v2rayzone-bandwidth-limiter
 
-# Ask to create global 'ams' shortcut
+# Create 'ams' shortcut
 AMS_SHORTCUT="/usr/local/bin/ams"
-echo -e "${YELLOW}Would you like to create 'ams' command? (y/n)${PLAIN}"
-read -r add_shortcut
-if [[ "$add_shortcut" =~ ^[Yy]$ ]]; then
+if [[ ! -f "$AMS_SHORTCUT" ]]; then
     cat > "$AMS_SHORTCUT" << 'EOFX'
 #!/bin/bash
 /usr/local/bin/v2rayzone-bandwidth-limiter.sh "$@"
 EOFX
     chmod +x "$AMS_SHORTCUT"
-    echo -e "${GREEN}'ams' command created. Type 'ams' anytime.${PLAIN}"
+    echo -e "${GREEN}'ams' command created successfully. Type 'ams' anytime.${PLAIN}"
 else
-    echo -e "${YELLOW}You can always create the 'ams' command manually later.${PLAIN}"
+    echo -e "${YELLOW}'ams' already exists. Skipping creation.${PLAIN}"
 fi
 
-# Add daily cron job for enforcement
+# Add daily cron job
 (crontab -l 2>/dev/null | grep -v "v2rayzone-bandwidth-limiter") | \
   echo "0 0 * * * root $SCRIPT_PATH --enforce-quota" | crontab -
 
 # Success message
 echo -e "${GREEN}Installation completed successfully.${PLAIN}"
-echo -e "${YELLOW}Run 'ams' or '$SCRIPT_PATH' to configure bandwidth limits.${PLAIN}"
+echo -e "${YELLOW}Run 'ams' to configure bandwidth limits.${PLAIN}"
