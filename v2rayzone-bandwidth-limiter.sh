@@ -478,21 +478,29 @@ reset_quota_manually() {
     echo -e "${GREEN}Quota has been manually reset for $new_plan_days days starting from $(date +%F)${PLAIN}"
 }
 
-# Function to create global command 'ams'
-ask_create_global_shortcut() {
-    echo -e "${YELLOW}Would you like to create a global command 'ams' to access the menu later? (y/n)${PLAIN}"
-    read -p "Your choice: " create_shortcut
-    if [[ "$create_shortcut" =~ ^[Yy]$ ]]; then
-        cat > /usr/local/bin/ams << 'EOFX'
-#!/bin/bash
-/usr/local/bin/v2rayzone-bandwidth-limiter.sh "$@"
-EOFX
-        chmod +x /usr/local/bin/ams
-        echo -e "${GREEN}Global command 'ams' created. You can now type 'ams' to launch the menu.${PLAIN}"
+# Ask user to create global 'ams' command at exit
+setup_global_alias() {
+    echo -e "${YELLOW}Would you like to create 'ams' command for easy access? (y/n)${PLAIN}"
+    read -r -p "> " add_alias
+
+    if [[ "$add_alias" =~ ^[Yy]$ ]]; then
+        # Ensure target directory exists
+        mkdir -p /root/ams/
+        
+        # Copy current script to /root/ams/
+        cp "$0" /root/ams/v2rayzone-bandwidth-limiter.sh
+        chmod +x /root/ams/v2rayzone-bandwidth-limiter.sh
+
+        # Create symlink only if not exists
+        if [ ! -f "/usr/local/bin/ams" ]; then
+            sudo ln -s /root/ams/v2rayzone-bandwidth-limiter.sh /usr/local/bin/ams
+            echo -e "${GREEN}AMS global command created: type 'ams' anytime!${PLAIN}"
+        else
+            echo -e "${YELLOW}'ams' command already exists.${PLAIN}"
+        fi
     else
-        echo -e "${YELLOW}Exited without creating global command. Re-run script to set it up.${PLAIN}"
+        echo -e "${BLUE}Global command skipped. You can manually set it later.${PLAIN}"
     fi
-    exit 0
 }
 
 # Add Cron Job for Daily Enforcement
@@ -521,9 +529,12 @@ main() {
             8) check_status ;;
             9) view_logs ;;
             10) reset_quota_manually ;;
-            0) ask_create_global_shortcut ;;
-            *) echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
-        esac
+            0)  setup_global_alias
+                exit 0
+                ;;
+            *)
+               echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
+    esac
         read -rsp $'\nPress any key to continue...' -n1 key
     done
 }
