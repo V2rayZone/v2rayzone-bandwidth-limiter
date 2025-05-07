@@ -38,7 +38,37 @@ EOF
 chmod +x /usr/local/bin/v2bwl
 
 # Output success message
-echo -e "${GREEN}Download completed. Starting the bandwidth limiter...${PLAIN}"
+echo -e "${GREEN}Command shortcut created. Run 'v2bwl' to access the menu.${PLAIN}"
+
+# Install systemd service
+SERVICE_FILE="/etc/systemd/system/v2rayzone-bandwidth-limiter.service"
+SCRIPT_PATH="/usr/local/bin/v2rayzone-bandwidth-limiter.sh"
+
+cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=V2RayZone Bandwidth Limiter
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStartPre=-$SCRIPT_PATH --enforce-quota
+ExecStart=$SCRIPT_PATH --start
+ExecStop=$SCRIPT_PATH --stop
+Restart=on-failure
+RestartSec=5
+StandardInput=null
+StandardOutput=null
+StandardError=null
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable v2rayzone-bandwidth-limiter
 
 # Run the script
-/usr/local/bin/v2rayzone-bandwidth-limiter.sh
+echo -e "${GREEN}Starting the bandwidth limiter...${PLAIN}"
+"$SCRIPT_PATH"
