@@ -23,13 +23,22 @@ if ! command -v curl &> /dev/null; then
     apt-get update && apt-get install -y curl
 fi
 
-# Download the latest version
+# Download the main script
 echo -e "${YELLOW}Downloading the latest version...${PLAIN}"
-curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o v2rayzone-bandwidth-limiter.sh
+curl -Ls https://raw.githubusercontent.com/V2rayZone/v2rayzone-bandwidth-limiter/main/v2rayzone-bandwidth-limiter.sh -o /usr/local/bin/v2rayzone-bandwidth-limiter.sh
 
-# Make it executable
-chmod +x v2rayzone-bandwidth-limiter.sh
+# Make sure it's executable
+chmod +x /usr/local/bin/v2rayzone-bandwidth-limiter.sh
+
+# Create global shortcut 'v2bwl'
+cat > /usr/local/bin/v2bwl << 'EOF'
+#!/bin/bash
+/usr/local/bin/v2rayzone-bandwidth-limiter.sh "$@"
+EOF
+chmod +x /usr/local/bin/v2bwl
+
+# Output success message
+echo -e "${GREEN}Download completed. Starting the bandwidth limiter...${PLAIN}"
 
 # Run the script
-echo -e "${GREEN}Download completed. Starting the bandwidth limiter...${PLAIN}"
-./v2rayzone-bandwidth-limiter.sh
+/usr/local/bin/v2rayzone-bandwidth-limiter.sh
