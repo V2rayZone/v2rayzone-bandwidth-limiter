@@ -1,7 +1,7 @@
 #!/bin/bash
-
 # V2RayZone Bandwidth Limiter Installer
 # Author: V2RayZone
+# This script downloads and installs the V2RayZone Bandwidth Limiter
 
 # Colors
 RED="\033[31m"
