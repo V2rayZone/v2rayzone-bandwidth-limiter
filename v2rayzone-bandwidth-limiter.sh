@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2RayZone Bandwidth Limiter v2.2 - FIXED VERSION
+# V2RayZone Bandwidth Limiter v2.3 - FINAL FIXED VERSION
 # Author: V2RayZone
 # Description: A script to limit bandwidth + enforce monthly quota on Ubuntu VPS
 # 
@@ -194,7 +194,13 @@ apply_bandwidth_limit() {
         return 1
     fi
     
+    # Convert Mbps to kbps
     local kbps=$(echo "scale=0; $speed_limit * 1024" | bc -l)
+    
+    # Ensure minimum rate
+    if (( $(echo "$kbps < 1" | bc -l) )); then
+        kbps=1
+    fi
     
     debug_log "Attempting to apply bandwidth limit of ${speed_limit}Mbps (${kbps}kbit) to interface $interface"
     
@@ -209,22 +215,25 @@ apply_bandwidth_limit() {
     
     echo -e "${YELLOW}Applying new limit: ${speed_limit}Mbps${PLAIN}"
     
-    # Add HTB qdisc with proper r2q to avoid quantum issues
+    # Calculate optimal quantum (minimum 1514 bytes)
+    local quantum=$(echo "scale=0; ($kbps / 10) + 1514" | bc -l)
+    
+    # Add HTB qdisc with optimized r2q
     if ! tc qdisc add dev "$interface" root handle 1: htb default 10 r2q 10; then
         echo -e "${RED}Failed to apply QDisc. Aborting bandwidth limit application.${PLAIN}"
         debug_log "Failed to apply QDisc"
         return 1
     fi
     
-    # Add HTB class
-    if ! tc class add dev "$interface" parent 1: classid 1:10 htb rate "${kbps}kbit" ceil "${kbps}kbit"; then
+    # Add HTB class with explicit quantum
+    if ! tc class add dev "$interface" parent 1: classid 1:10 htb rate "${kbps}kbit" ceil "${kbps}kbit" quantum "$quantum"; then
         echo -e "${RED}Failed to apply HTB class. Aborting.${PLAIN}"
         debug_log "Failed to apply HTB class"
         return 1
     fi
     
     echo "$(date): Applied bandwidth limit of ${speed_limit}Mbps to interface $interface" >> "$LOG_FILE"
-    debug_log "Successfully applied bandwidth limit"
+    debug_log "Successfully applied bandwidth limit with quantum $quantum"
     echo -e "${GREEN}Bandwidth limit of ${speed_limit}Mbps applied successfully${PLAIN}"
 }
 
@@ -304,9 +313,9 @@ track_and_enforce_usage() {
         # Remove existing qdisc
         tc qdisc del dev "$INTERFACE" root 2>/dev/null
         
-        # Apply minimum speed
+        # Apply minimum speed with proper quantum
         tc qdisc add dev "$INTERFACE" root handle 1: htb default 10 r2q 10
-        tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "1kbit" ceil "1kbit"
+        tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "1kbit" ceil "1kbit" quantum 1514
         
         echo "$(date): Quota exceeded, throttled to 1kbit" >> "$LOG_FILE"
     else
@@ -316,9 +325,8 @@ track_and_enforce_usage() {
         # Remove existing qdisc
         tc qdisc del dev "$INTERFACE" root 2>/dev/null
         
-        # Apply configured limit
-        tc qdisc add dev "$INTERFACE" root handle 1: htb default 10 r2q 10
-        tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "${SPEED_LIMIT}kbit" ceil "${SPEED_LIMIT}kbit"
+        # Apply configured limit using the proper function
+        apply_bandwidth_limit "$SPEED_LIMIT" "$INTERFACE"
     fi
 }
 
@@ -621,9 +629,15 @@ main() {
             8) check_status ;;
             9) view_logs ;;
             0) exit 0 ;;
-            *) echo -e "${RED}Invalid option. Try again.${PLAIN}" ;;
+            *) 
+                echo -e "${RED}Invalid option. Try again.${PLAIN}"
+                sleep 2
+                ;;
         esac
-        read -rsp $'\nPress any key to continue...' -n1 key
+        # Only prompt for key if not exiting
+        if [[ "$choice" != "0" ]]; then
+            read -rsp $'\nPress any key to continue...' -n1 key
+        fi
     done
 }
 
