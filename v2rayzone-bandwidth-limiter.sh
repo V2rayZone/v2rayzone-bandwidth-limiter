@@ -90,7 +90,6 @@ calculate_days_elapsed() {
 
 calculate_days_remaining_plan() {
   local start_date="$1" plan_days="$2"
-  # integer math: days elapsed since start
   local start_ts now days_elapsed remaining
   start_ts=$(date -d "$start_date" "+%s" 2>/dev/null) || { echo "1"; return; }
   now=$(date +%s)
@@ -101,29 +100,39 @@ calculate_days_remaining_plan() {
 }
 
 calculate_speed_limit() {
+  # Args: total_tb start_date plan_days
   local total_tb="$1" start_date="$2" plan_days="$3"
 
-  # Remaining days from plan
+  # Remaining days based on plan (at least 1)
   local remaining_days
   remaining_days=$(calculate_days_remaining_plan "$start_date" "$plan_days")
-  (( remaining_days < 1 )) && remaining_days=1
+  [[ -z "$remaining_days" || "$remaining_days" -lt 1 ]] && remaining_days=1
 
-  # Remaining bytes
-  local total_bytes bytes_used bytes_rem per_day bps mbps
-  total_bytes=$(echo "$total_tb * 1024^4" | bc -l)
+  # Usage so far (default 0)
+  local bytes_used
   bytes_used=$(grep -oP 'USED_BYTES=\K[0-9]+' "$USAGE_LOG" 2>/dev/null)
   [[ -z "$bytes_used" ]] && bytes_used=0
-  bytes_rem=$(echo "$total_bytes - $bytes_used" | bc -l)
-  (echo "$bytes_rem <= 0" | bc -l) >/dev/null && bytes_rem=1
 
-  # bytes/day -> bits/s
-  per_day=$(echo "$bytes_rem / $remaining_days" | bc -l)
-  bps=$(echo "$per_day * 8 / 86400" | bc -l)
+  # Compute with awk to avoid bc integer/scale traps
+  # Constants:
+  #   1 TB (binary) = 1024^4 = 1099511627776 bytes
+  #   1 Mi = 1048576
+  local mbps
+  mbps=$(awk -v total_tb="$total_tb" -v used="$bytes_used" -v days="$remaining_days" '
+    BEGIN {
+      bytes_per_tb = 1099511627776.0
+      total_bytes  = total_tb * bytes_per_tb
+      remaining    = total_bytes - used
+      if (remaining < 1) remaining = 1
+      per_day      = remaining / days
+      bps          = per_day * 8.0 / 86400.0
+      mbps_float   = bps / 1048576.0
+      # ceil to integer Mbps; floor to 1 minimum
+      mbps_int     = int(mbps_float + 0.999999)
+      if (mbps_int < 1) mbps_int = 1
+      print mbps_int
+    }')
 
-  # ceil to Mbps and ensure >= 1
-  # Mi bps to Mi bps: divide by 2^20
-  mbps=$(echo "($bps + 1048575)/1048576" | bc)
-  (( mbps < 1 )) && mbps=1
   echo "$mbps"
 }
 
