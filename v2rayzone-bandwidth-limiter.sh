@@ -88,35 +88,43 @@ calculate_days_elapsed() {
   echo $(( (now - start_ts) / 86400 ))
 }
 
-calculate_days_remaining() {
-  local start_date="$1"
-  local end_of_month end_ts now days_left
-  end_of_month=$(date -d "$start_date +1 month -1 day" "+%Y-%m-%d")
-  end_ts=$(date -d "$end_of_month 23:59:59" "+%s")
+calculate_days_remaining_plan() {
+  local start_date="$1" plan_days="$2"
+  # integer math: days elapsed since start
+  local start_ts now days_elapsed remaining
+  start_ts=$(date -d "$start_date" "+%s" 2>/dev/null) || { echo "1"; return; }
   now=$(date +%s)
-  days_left=$(( (end_ts - now + 86399) / 86400 ))
-  (( days_left < 0 )) && days_left=0
-  echo "$days_left"
+  days_elapsed=$(( (now - start_ts) / 86400 ))
+  remaining=$(( plan_days - days_elapsed ))
+  (( remaining < 1 )) && remaining=1
+  echo "$remaining"
 }
 
 calculate_speed_limit() {
-  local total_tb="$1"
-  local current_day month_end_day remaining_days total_bytes bytes_used bytes_remaining per_day bps mbps
-  current_day=$(date +%d)
-  month_end_day=$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)
-  remaining_days=$(( month_end_day - current_day + 1 ))
-  (( remaining_days <= 0 )) && remaining_days=1
+  local total_tb="$1" start_date="$2" plan_days="$3"
 
+  # Remaining days from plan
+  local remaining_days
+  remaining_days=$(calculate_days_remaining_plan "$start_date" "$plan_days")
+  (( remaining_days < 1 )) && remaining_days=1
+
+  # Remaining bytes
+  local total_bytes bytes_used bytes_rem per_day bps mbps
   total_bytes=$(echo "$total_tb * 1024^4" | bc -l)
   bytes_used=$(grep -oP 'USED_BYTES=\K[0-9]+' "$USAGE_LOG" 2>/dev/null)
   [[ -z "$bytes_used" ]] && bytes_used=0
-  bytes_remaining=$(echo "$total_bytes - $bytes_used" | bc -l)
-  (echo "$bytes_remaining <= 0" | bc -l) >/dev/null && bytes_remaining=1
+  bytes_rem=$(echo "$total_bytes - $bytes_used" | bc -l)
+  (echo "$bytes_rem <= 0" | bc -l) >/dev/null && bytes_rem=1
 
-  per_day=$(echo "$bytes_remaining / $remaining_days" | bc -l)
+  # bytes/day -> bits/s
+  per_day=$(echo "$bytes_rem / $remaining_days" | bc -l)
   bps=$(echo "$per_day * 8 / 86400" | bc -l)
-  mbps=$(echo "($bps + 1048575)/1048576" | bc)  # round up
-  echo "${mbps:-1}"
+
+  # ceil to Mbps and ensure >= 1
+  # Mi bps to Mi bps: divide by 2^20
+  mbps=$(echo "($bps + 1048575)/1048576" | bc)
+  (( mbps < 1 )) && mbps=1
+  echo "$mbps"
 }
 
 # ===== Shaping (TBF + fq_codel) =====
@@ -182,15 +190,16 @@ remove_bandwidth_limit() {
 
 # ===== Config I/O =====
 save_configuration() {
-  local total_tb="$1" start_date="$2" speed_limit="$3" interface="$4"
+  local total_tb="$1" start_date="$2" speed_limit="$3" interface="$4" plan_days="$5"
   cat > "$CONFIG_FILE" <<EOF
 TOTAL_TB="${total_tb}"
 START_DATE="${start_date}"
 SPEED_LIMIT="${speed_limit}"
 INTERFACE="${interface}"
+PLAN_DAYS="${plan_days}"
 EOF
   chmod 600 "$CONFIG_FILE"
-  echo "$(date '+%F %T'): Config saved (Total=${total_tb}TB, Start=${start_date}, Speed=${speed_limit}Mbps, IF=${interface})" >> "$LOG_FILE"
+  echo "$(date '+%F %T'): Config saved (Total=${total_tb}TB, Start=${start_date}, Speed=${speed_limit}Mbps, IF=${interface}, PlanDays=${plan_days})" >> "$LOG_FILE"
   echo -e "${GREEN}Configuration saved${PLAIN}"
 }
 
@@ -296,12 +305,26 @@ EOF
 # ===== Shortcut =====
 create_command_shortcut() {
   local shortcut="/usr/local/bin/v2bwl"
+
+  # Create the primary launcher
   cat > "$shortcut" <<EOF
-#!/bin/bash
-$SCRIPT_PATH "\$@"
+#!/usr/bin/env bash
+exec "$SCRIPT_PATH" "\$@"
 EOF
-  chmod +x "$shortcut"
+  chmod 0755 "$shortcut"
+
+  # Make v2bwl visible even when sudo uses a restricted secure_path
+  for d in /usr/local/sbin /usr/sbin /sbin; do
+    if [[ -d "$d" ]]; then
+      ln -sfn "$shortcut" "$d/v2bwl"
+    fi
+  done
+
+  # Refresh the current shell's command cache (harmless if not needed)
+  hash -r 2>/dev/null || true
+
   echo -e "${GREEN}Command shortcut 'v2bwl' ready${PLAIN}"
+  echo -e "${YELLOW}Try: 'sudo /usr/sbin/v2bwl' or 'sudo v2bwl' (depending on sudo secure_path)${PLAIN}"
 }
 
 # ===== Install / Uninstall =====
@@ -336,7 +359,7 @@ uninstall() {
 
 # ===== Configure =====
 configure_bandwidth() {
-  local total_tb plan_days start_date days_elapsed days_remaining recommended_speed speed_limit interface
+  local total_tb plan_days start_date recommended_speed speed_limit interface
   echo -e "${BLUE}=== V2RayZone Bandwidth Limiter Configuration ===${PLAIN}"
 
   read -p "Enter total TB allocation for this VPS: " total_tb
@@ -352,11 +375,11 @@ configure_bandwidth() {
   done
 
   start_date=$(date +"%Y-%m-%d")
-  days_elapsed=$(calculate_days_elapsed "$start_date")
-  days_remaining=$(calculate_days_remaining "$start_date")
-  recommended_speed=$(calculate_speed_limit "$total_tb" "$days_elapsed")
 
-  echo -e "${YELLOW}Suggested speed based on remaining month: ${recommended_speed} Mbps${PLAIN}"
+  # NEW: plan-based recommendation (never below 1 Mbps)
+  recommended_speed=$(calculate_speed_limit "$total_tb" "$start_date" "$plan_days")
+
+  echo -e "${YELLOW}Suggested speed based on remaining plan: ${recommended_speed} Mbps${PLAIN}"
   read -p "Use recommended speed? (y/n): " use_rec
   if [[ "$use_rec" =~ ^[Yy]$ ]]; then
     speed_limit="$recommended_speed"
@@ -374,7 +397,8 @@ configure_bandwidth() {
     return 1
   fi
 
-  save_configuration "$total_tb" "$start_date" "$speed_limit" "$interface"
+  # NEW: persist PLAN_DAYS too (5th arg)
+  save_configuration "$total_tb" "$start_date" "$speed_limit" "$interface" "$plan_days"
 
   # Initialize usage
   echo "USED_BYTES=0" > "$USAGE_LOG"
@@ -393,12 +417,23 @@ view_settings() {
     return 1
   fi
 
-  # shellcheck disable=SC1090
-  source "$USAGE_LOG" 2>/dev/null || { USED_BYTES=0; LAST_TX=0; }
-  local days_elapsed days_remaining recommended_speed used_tb remaining_tb
-  days_elapsed=$(calculate_days_elapsed "$START_DATE")
-  days_remaining=$(calculate_days_remaining "$START_DATE")
-  recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$days_elapsed")
+  # Load usage (safe defaults if missing)
+  if [[ -f "$USAGE_LOG" ]]; then
+    # shellcheck disable=SC1090
+    source "$USAGE_LOG"
+  else
+    USED_BYTES=0
+    LAST_TX=0
+  fi
+
+  # Default PLAN_DAYS for old configs
+  : "${PLAN_DAYS:=30}"
+
+  # Compute plan-based remaining + recommended (never < 1 Mbps)
+  local days_remaining_plan recommended_speed used_tb remaining_tb
+  days_remaining_plan=$(calculate_days_remaining_plan "$START_DATE" "$PLAN_DAYS")
+  recommended_speed=$(calculate_speed_limit "$TOTAL_TB" "$START_DATE" "$PLAN_DAYS")
+
   used_tb=$(echo "scale=2; ${USED_BYTES:-0} / 1024^4" | bc)
   remaining_tb=$(echo "scale=2; $TOTAL_TB - $used_tb" | bc)
 
@@ -406,12 +441,35 @@ view_settings() {
   echo -e "Total allocation: ${TOTAL_TB} TB"
   echo -e "Used: ${used_tb} TB"
   echo -e "Remaining: ${remaining_tb} TB"
+  echo -e "Plan days: ${PLAN_DAYS}"
   echo -e "Start date: ${START_DATE}"
-  echo -e "Days remaining (this month calc): ${days_remaining}"
+  echo -e "Days remaining (plan): ${days_remaining_plan}"
   echo -e "Current speed limit: ${SPEED_LIMIT} Mbps"
   echo -e "Recommended speed (today): ${recommended_speed} Mbps"
   echo -e "Interface: ${INTERFACE}"
   echo -e "Status: ${STATUS}"
+  echo -e ""
+
+  echo -e "${YELLOW}Options:${PLAIN}"
+  echo -e "1. Delete Configuration"
+  echo -e "2. Back to Main Menu"
+  read -p "Select [1-2]: " sub_choice
+
+  case "$sub_choice" in
+    1)
+      rm -fv "$CONFIG_FILE"
+      rm -fv "$USAGE_LOG"
+      TOTAL_TB=""; START_DATE=""; SPEED_LIMIT=""; INTERFACE=""; PLAN_DAYS=""
+      STATUS="stopped"
+      echo -e "${GREEN}Configuration deleted successfully${PLAIN}"
+      debug_log "Configuration deleted"
+      ;;
+    2) ;;
+    *)
+      echo -e "${RED}Invalid option.${PLAIN}"
+      sleep 2
+      ;;
+  esac
 }
 
 # ===== Start/Stop/Restart (apply only; service+timer do enforcement) =====
