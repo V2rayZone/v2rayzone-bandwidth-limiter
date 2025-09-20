@@ -315,23 +315,21 @@ EOF
 create_command_shortcut() {
   local shortcut="/usr/local/bin/v2bwl"
 
-  # Create the primary launcher
-  cat > "$shortcut" <<EOF
+  # Create a wrapper that *always* opens the menu
+  cat > "$shortcut" <<'EOF'
 #!/usr/bin/env bash
-exec "$SCRIPT_PATH" "\$@"
+exec /bin/bash /usr/local/bin/v2rayzone-bandwidth-limiter.sh --menu "$@"
 EOF
   chmod 0755 "$shortcut"
 
-  # Make v2bwl visible even when sudo uses a restricted secure_path
+  # Make v2bwl visible even with sudo secure_path
   for d in /usr/local/sbin /usr/sbin /sbin; do
     if [[ -d "$d" ]]; then
       ln -sfn "$shortcut" "$d/v2bwl"
     fi
   done
 
-  # Refresh the current shell's command cache (harmless if not needed)
   hash -r 2>/dev/null || true
-
   echo -e "${GREEN}Command shortcut 'v2bwl' ready${PLAIN}"
   echo -e "${YELLOW}Try: 'sudo /usr/sbin/v2bwl' or 'sudo v2bwl' (depending on sudo secure_path)${PLAIN}"
 }
@@ -534,8 +532,8 @@ view_logs() {
 
 # ===== Menu (safe: no busy-loop headless) =====
 show_menu() {
-  # If stdin is not a TTY, skip menu (prevents CPU spin)
-  if [[ ! -t 0 ]]; then
+  # If stdin is not a TTY and we're not forcing, skip menu (prevents CPU spin)
+  if [[ "$FORCE_MENU" != "true" && ! -t 0 ]]; then
     return 1
   fi
   clear
@@ -561,15 +559,15 @@ show_menu() {
   echo -e "0. Exit"
   echo -e ""
   echo -e "Panel status: ${STATUS}"
-  echo -e "Auto (timer): $(systemctl is-enabled v2rayzone-bandwidth-limiter.timer 2>/dev/null || echo "No")"
+  echo -e "Auto (timer): $(systemctl is-enabled v2rayzone-bandwidth-limiter.timer 2>/dev/null || echo No)"
   echo -e ""
   read -p "Please enter your selection [0-9]: " choice || choice=""
 }
 
 main() {
-  # Exit immediately if not interactive and no flags
-  if [[ ! -t 0 && $# -eq 0 ]]; then
-    echo "Non-interactive mode. Use flags: --start / --stop / --enforce-quota / --install / --uninstall"
+  # Exit immediately if not interactive and no flags, unless forcing menu
+  if [[ "$FORCE_MENU" != "true" && ! -t 0 && $# -eq 0 ]]; then
+    echo "Non-interactive mode. Use flags: --menu / --start / --stop / --enforce-quota / --install / --uninstall"
     exit 0
   fi
   while true; do
@@ -587,7 +585,8 @@ main() {
       0) exit 0 ;;
       *) echo -e "${RED}Invalid option. Try again.${PLAIN}"; sleep 1 ;;
     esac
-    if [[ "$choice" != "0" && -t 0 ]]; then
+    # Pause only if interactive or forced
+    if [[ "$choice" != "0" && ( "$FORCE_MENU" == "true" || -t 0 ) ]]; then
       read -rsp $'\nPress any key to continue...' -n1 _key
     fi
   done
@@ -595,6 +594,12 @@ main() {
 
 # ===== Flags (non-interactive safe) =====
 case "${1:-}" in
+  --menu)
+    FORCE_MENU=true
+    shift
+    main "$@"
+    exit 0
+    ;;
   --start)
     if load_configuration; then
       track_and_enforce_usage
